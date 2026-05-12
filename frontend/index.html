@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mneme</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f5f5f7;
+      --surface: #ffffff;
+      --surface2: #f0f0f2;
+      --border: #d2d2d7;
+      --text: #1d1d1f;
+      --text2: #6e6e73;
+      --accent: #0071e3;
+      --accent-hover: #0077ed;
+      --danger: #ff3b30;
+      --success: #34c759;
+      --warning: #ff9f0a;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* Nav */
+    nav {
+      width: 100%;
+      background: rgba(255,255,255,0.85);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      height: 52px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .nav-logo {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+      color: var(--text);
+    }
+
+    .nav-logo span {
+      color: var(--accent);
+    }
+
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text2);
+      padding: 4px 10px;
+      background: var(--surface2);
+      border-radius: 20px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--border);
+      transition: background 0.3s;
+    }
+    .status-dot.ok { background: var(--success); }
+    .status-dot.error { background: var(--danger); }
+
+    .btn-icon {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text2);
+      padding: 6px;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.15s, background 0.15s;
+    }
+    .btn-icon:hover { color: var(--text); background: var(--surface2); }
+
+    /* Main layout */
+    main {
+      width: 100%;
+      max-width: 700px;
+      padding: 48px 24px 80px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .page { display: none; flex-direction: column; gap: 24px; }
+    .page.active { display: flex; }
+
+    /* Card */
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+    }
+
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 20px;
+    }
+
+    /* Drop zone */
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 60px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+    #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(0, 113, 227, 0.04);
+    }
+    #drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    .drop-icon {
+      margin: 0 auto 16px;
+      width: 48px;
+      height: 48px;
+      background: var(--surface2);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text2);
+    }
+
+    .drop-title {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .drop-sub {
+      font-size: 14px;
+      color: var(--text2);
+    }
+
+    /* Model toggle */
+    .model-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .model-label {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .model-sub {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 2px;
+    }
+
+    .segmented {
+      display: flex;
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      padding: 3px;
+      gap: 2px;
+    }
+
+    .segmented button {
+      font-size: 13px;
+      font-weight: 500;
+      padding: 5px 14px;
+      border: none;
+      background: none;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--text2);
+      transition: background 0.15s, color 0.15s;
+    }
+    .segmented button.active {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    }
+
+    /* Process button */
+    .btn-primary {
+      width: 100%;
+      padding: 14px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Progress / result */
+    #status-box {
+      display: none;
+      padding: 16px 20px;
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    #status-box.info { background: rgba(0,113,227,0.08); color: var(--accent); display: block; }
+    #status-box.success { background: rgba(52,199,89,0.1); color: #1a7a35; display: block; }
+    #status-box.error { background: rgba(255,59,48,0.08); color: #c0392b; display: block; }
+
+    .progress-bar-wrap {
+      display: none;
+      height: 4px;
+      background: var(--surface2);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-bar-wrap.active { display: block; }
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+    .progress-bar.indeterminate {
+      width: 40%;
+      animation: slide 1.4s ease-in-out infinite;
+    }
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+
+    /* Settings */
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 20px;
+    }
+    .form-group:last-child { margin-bottom: 0; }
+
+    label {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text2);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    select {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 15px;
+      color: var(--text);
+      background: var(--surface);
+      outline: none;
+      transition: border-color 0.15s;
+      -webkit-appearance: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+    }
+    .input-row input { flex: 1; }
+
+    .btn-secondary {
+      padding: 10px 16px;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn-secondary:hover { background: var(--border); }
+
+    .save-row {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 8px;
+    }
+
+    .btn-save {
+      padding: 10px 24px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-save:hover { background: var(--accent-hover); }
+
+    .hint {
+      font-size: 12px;
+      color: var(--text2);
+      margin-top: 4px;
+    }
+
+    /* Vault info */
+    .vault-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      color: var(--text2);
+    }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--text);
+      color: white;
+      padding: 12px 20px;
+      border-radius: 24px;
+      font-size: 14px;
+      font-weight: 500;
+      opacity: 0;
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 999;
+      white-space: nowrap;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* Vault banner */
+    #vault-banner {
+      display: none;
+      background: rgba(255,159,10,0.12);
+      border: 1.5px solid rgba(255,159,10,0.4);
+      border-radius: var(--radius-sm);
+      padding: 14px 18px;
+      font-size: 14px;
+      color: #7a4a00;
+      line-height: 1.5;
+    }
+    #vault-banner.visible { display: block; }
+    #vault-banner a { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 500; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">mne<span>me</span></div>
+  <div class="nav-right">
+    <div class="status-pill">
+      <div class="status-dot" id="ollama-dot"></div>
+      <span id="ollama-label">Ollama</span>
+    </div>
+    <button class="btn-icon" id="btn-settings" title="Einstellungen">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+    <button class="btn-icon" id="btn-home" title="Home" style="display:none">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        <polyline points="9 22 9 12 15 12 15 22"/>
+      </svg>
+    </button>
+  </div>
+</nav>
+
+<main>
+
+  <!-- Home page -->
+  <div class="page active" id="page-home">
+
+    <div id="vault-banner">
+      Kein Vault-Pfad konfiguriert. <a id="banner-settings-link">Einstellungen öffnen →</a>
+    </div>
+
+    <div class="card">
+      <div id="drop-zone">
+        <input type="file" id="file-input" accept=".pdf" />
+        <div class="drop-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div class="drop-title">PDF hier ablegen</div>
+        <div class="drop-sub">oder klicken zum Auswählen</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="model-row">
+        <div>
+          <div class="model-label">Modell</div>
+          <div class="model-sub" id="model-sub-text">Automatisch: Ollama wenn verfügbar, sonst Claude</div>
+        </div>
+        <div class="segmented" id="model-toggle">
+          <button data-model="auto" class="active">Auto</button>
+          <button data-model="ollama">Ollama</button>
+          <button data-model="claude">Claude</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="progress-bar-wrap" id="progress-wrap">
+      <div class="progress-bar indeterminate" id="progress-bar"></div>
+    </div>
+
+    <div id="status-box"></div>
+
+    <button class="btn-primary" id="btn-process" disabled>Verarbeiten</button>
+
+  </div>
+
+  <!-- Settings page -->
+  <div class="page" id="page-settings">
+
+    <div class="card">
+      <div class="card-title">Vault</div>
+
+      <div class="form-group">
+        <label>Vault-Pfad</label>
+        <div class="input-row">
+          <input type="text" id="cfg-vault-path" placeholder="/Users/…/Obsidian/MeinVault" />
+        </div>
+        <div class="hint" id="vault-status-hint"></div>
+      </div>
+
+      <div class="form-group" id="wikilink-info-row" style="display:none">
+        <div class="vault-info">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <span id="wikilink-count-text">— Wikilinks</span>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-title">Modell</div>
+
+      <div class="form-group">
+        <label>Standard-Modell</label>
+        <select id="cfg-default-model">
+          <option value="auto">Auto (Ollama → Claude Fallback)</option>
+          <option value="ollama">Ollama (immer)</option>
+          <option value="claude">Claude API (immer)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Ollama-Modell</label>
+        <input type="text" id="cfg-ollama-model" placeholder="llama3.1:8b" />
+        <div class="hint">Name des lokalen Ollama-Modells</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-title">Claude API</div>
+
+      <div class="form-group">
+        <label>API Key</label>
+        <input type="password" id="cfg-api-key" placeholder="sk-ant-…" autocomplete="off" />
+        <div class="hint">Wird lokal in config.json gespeichert, nie übertragen</div>
+      </div>
+
+    </div>
+
+    <div class="save-row">
+      <button class="btn-save" id="btn-save-settings">Speichern</button>
+    </div>
+
+  </div>
+
+</main>
+
+<div id="toast"></div>
+
+<script>
+  const API = 'http://localhost:5050';
+
+  // State
+  let selectedFile = null;
+  let selectedModel = 'auto';
+  let processing = false;
+
+  // Elements
+  const pageHome = document.getElementById('page-home');
+  const pageSettings = document.getElementById('page-settings');
+  const btnSettings = document.getElementById('btn-settings');
+  const btnHome = document.getElementById('btn-home');
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+  const btnProcess = document.getElementById('btn-process');
+  const statusBox = document.getElementById('status-box');
+  const progressWrap = document.getElementById('progress-wrap');
+  const progressBar = document.getElementById('progress-bar');
+  const ollamaDot = document.getElementById('ollama-dot');
+  const ollamaLabel = document.getElementById('ollama-label');
+  const vaultBanner = document.getElementById('vault-banner');
+  const modelToggle = document.getElementById('model-toggle');
+  const modelSubText = document.getElementById('model-sub-text');
+
+  // Navigation
+  btnSettings.addEventListener('click', () => showPage('settings'));
+  btnHome.addEventListener('click', () => showPage('home'));
+  document.getElementById('banner-settings-link').addEventListener('click', () => showPage('settings'));
+
+  function showPage(page) {
+    if (page === 'settings') {
+      pageHome.classList.remove('active');
+      pageSettings.classList.add('active');
+      btnSettings.style.display = 'none';
+      btnHome.style.display = 'flex';
+      loadSettings();
+    } else {
+      pageSettings.classList.remove('active');
+      pageHome.classList.add('active');
+      btnSettings.style.display = 'flex';
+      btnHome.style.display = 'none';
+    }
+  }
+
+  // Ollama status
+  async function checkOllama() {
+    try {
+      const r = await fetch(`${API}/ollama/status`);
+      const data = await r.json();
+      if (data.available) {
+        ollamaDot.className = 'status-dot ok';
+        ollamaLabel.textContent = `Ollama (${data.model})`;
+      } else {
+        ollamaDot.className = 'status-dot error';
+        ollamaLabel.textContent = 'Ollama offline';
+      }
+    } catch {
+      ollamaDot.className = 'status-dot error';
+      ollamaLabel.textContent = 'Ollama offline';
+    }
+  }
+
+  // Vault check
+  async function checkVault() {
+    try {
+      const r = await fetch(`${API}/config`);
+      const cfg = await r.json();
+      if (!cfg.vault_path) {
+        vaultBanner.classList.add('visible');
+      } else {
+        vaultBanner.classList.remove('visible');
+      }
+    } catch {}
+  }
+
+  // File handling
+  dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0];
+    if (f && f.type === 'application/pdf') setFile(f);
+    else showToast('Nur PDF-Dateien werden unterstützt');
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) setFile(fileInput.files[0]);
+  });
+
+  function setFile(f) {
+    selectedFile = f;
+    dropZone.querySelector('.drop-title').textContent = f.name;
+    dropZone.querySelector('.drop-sub').textContent = formatBytes(f.size);
+    btnProcess.disabled = false;
+    clearStatus();
+  }
+
+  function formatBytes(b) {
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b/1024).toFixed(1)} KB`;
+    return `${(b/1024/1024).toFixed(1)} MB`;
+  }
+
+  // Model toggle
+  modelToggle.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      modelToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedModel = btn.dataset.model;
+      const labels = {
+        auto: 'Automatisch: Ollama wenn verfügbar, sonst Claude',
+        ollama: 'Immer Ollama (lokal)',
+        claude: 'Immer Claude API',
+      };
+      modelSubText.textContent = labels[selectedModel];
+    });
+  });
+
+  // Process
+  btnProcess.addEventListener('click', async () => {
+    if (!selectedFile || processing) return;
+    processing = true;
+    btnProcess.disabled = true;
+    showProgress();
+    clearStatus();
+
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+
+    try {
+      const r = await fetch(`${API}/process?model=${selectedModel}`, {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await r.json();
+
+      if (!r.ok) {
+        const msgs = {
+          vault_path_not_set: 'Kein Vault-Pfad gesetzt. Bitte Einstellungen öffnen.',
+          ollama_unavailable: 'Ollama ist nicht erreichbar. Bitte starte Ollama oder wechsle zu Claude.',
+          claude_api_key_missing: 'Claude API Key fehlt. Bitte in den Einstellungen eintragen.',
+          scanned_or_empty: 'PDF scheint gescannt oder leer zu sein — kein extrahierbarer Text.',
+        };
+        const msg = msgs[data.detail] || `Fehler: ${data.detail || r.statusText}`;
+        setStatus('error', msg);
+        return;
+      }
+
+      setStatus('success',
+        `Notiz erstellt: <strong>${data.filename}</strong><br>` +
+        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_available} Wikilinks verfügbar`
+      );
+      showToast('Notiz gespeichert ✓');
+      resetDrop();
+    } catch (e) {
+      setStatus('error', `Verbindung zum Backend fehlgeschlagen. Läuft uvicorn auf Port 5050?`);
+    } finally {
+      processing = false;
+      btnProcess.disabled = !selectedFile;
+      hideProgress();
+    }
+  });
+
+  function showProgress() {
+    progressWrap.classList.add('active');
+    progressBar.className = 'progress-bar indeterminate';
+  }
+
+  function hideProgress() {
+    progressWrap.classList.remove('active');
+    progressBar.className = 'progress-bar';
+  }
+
+  function setStatus(type, html) {
+    statusBox.className = `${type}`;
+    statusBox.innerHTML = html;
+  }
+
+  function clearStatus() {
+    statusBox.className = '';
+    statusBox.innerHTML = '';
+  }
+
+  function resetDrop() {
+    selectedFile = null;
+    dropZone.querySelector('.drop-title').textContent = 'PDF hier ablegen';
+    dropZone.querySelector('.drop-sub').textContent = 'oder klicken zum Auswählen';
+    fileInput.value = '';
+    btnProcess.disabled = true;
+  }
+
+  // Settings
+  async function loadSettings() {
+    const vaultInput = document.getElementById('cfg-vault-path');
+    const modelSelect = document.getElementById('cfg-default-model');
+    const ollamaInput = document.getElementById('cfg-ollama-model');
+    const apiKeyInput = document.getElementById('cfg-api-key');
+    const vaultHint = document.getElementById('vault-status-hint');
+    const wikilinkRow = document.getElementById('wikilink-info-row');
+    const wikilinkText = document.getElementById('wikilink-count-text');
+
+    try {
+      const [cfgR, keyR, wlR] = await Promise.all([
+        fetch(`${API}/config`).then(r => r.json()),
+        fetch(`${API}/config/has_api_key`).then(r => r.json()),
+        fetch(`${API}/wikilinks`).then(r => r.json()),
+      ]);
+
+      vaultInput.value = cfgR.vault_path || '';
+      modelSelect.value = cfgR.default_model || 'auto';
+      ollamaInput.value = cfgR.ollama_model || 'llama3.1:8b';
+      apiKeyInput.value = keyR.has_key ? '••••••••••••••••' : '';
+
+      if (cfgR.vault_path) {
+        vaultHint.textContent = '✓ Vault-Pfad gesetzt';
+        vaultHint.style.color = 'var(--success)';
+        if (wlR.count > 0) {
+          wikilinkRow.style.display = 'block';
+          wikilinkText.textContent = `${wlR.count.toLocaleString('de')} Wikilinks im Vault gefunden`;
+        }
+      } else {
+        vaultHint.textContent = 'Noch kein Vault-Pfad konfiguriert';
+        vaultHint.style.color = 'var(--warning)';
+      }
+    } catch {
+      vaultHint.textContent = 'Backend nicht erreichbar';
+      vaultHint.style.color = 'var(--danger)';
+    }
+  }
+
+  document.getElementById('btn-save-settings').addEventListener('click', async () => {
+    const vaultPath = document.getElementById('cfg-vault-path').value.trim();
+    const defaultModel = document.getElementById('cfg-default-model').value;
+    const ollamaModel = document.getElementById('cfg-ollama-model').value.trim();
+    const apiKeyRaw = document.getElementById('cfg-api-key').value.trim();
+
+    const body = { vault_path: vaultPath, default_model: defaultModel, ollama_model: ollamaModel };
+    if (apiKeyRaw && !apiKeyRaw.startsWith('•')) {
+      body.claude_api_key = apiKeyRaw;
+    }
+
+    try {
+      const r = await fetch(`${API}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        showToast('Einstellungen gespeichert');
+        await checkVault();
+        loadSettings();
+      } else {
+        showToast('Fehler beim Speichern');
+      }
+    } catch {
+      showToast('Backend nicht erreichbar');
+    }
+  });
+
+  // Toast
+  let toastTimer;
+  function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+  }
+
+  // Init
+  checkOllama();
+  checkVault();
+  setInterval(checkOllama, 15000);
+</script>
+</body>
+</html>

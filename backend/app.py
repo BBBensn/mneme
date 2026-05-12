@@ -1,0 +1,304 @@
+import json
+import re
+import textwrap
+from pathlib import Path
+
+import anthropic
+import fitz  # pymupdf
+import httpx
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+CONFIG_PATH = Path(__file__).parent.parent / "config.json"
+
+DEFAULT_CONFIG = {
+    "vault_path": "",
+    "default_model": "auto",
+    "claude_api_key": "",
+    "ollama_model": "llama3.1:8b",
+}
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+CHUNK_MAX_WORDS = 2000
+CHUNK_OVERLAP_WORDS = 200
+
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        for k, v in DEFAULT_CONFIG.items():
+            cfg.setdefault(k, v)
+        return cfg
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(cfg: dict):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def chunk_text(text: str) -> list[str]:
+    words = text.split()
+    chunks = []
+    step = CHUNK_MAX_WORDS - CHUNK_OVERLAP_WORDS
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i : i + CHUNK_MAX_WORDS])
+        chunks.append(chunk)
+        if i + CHUNK_MAX_WORDS >= len(words):
+            break
+    return chunks
+
+
+def extract_wikilinks(vault_path: str) -> list[str]:
+    links = set()
+    pattern = re.compile(r"\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]")
+    for md_file in Path(vault_path).rglob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8", errors="ignore")
+            for match in pattern.finditer(content):
+                links.add(match.group(1).strip())
+        except Exception:
+            pass
+    return sorted(links)
+
+
+async def ollama_available(model: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            if r.status_code != 200:
+                return False
+            tags = r.json().get("models", [])
+            return any(t.get("name", "").split(":")[0] == model.split(":")[0] for t in tags)
+    except Exception:
+        return False
+
+
+async def call_ollama(model: str, prompt: str) -> str:
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        r = await client.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False},
+        )
+        r.raise_for_status()
+        return r.json()["response"]
+
+
+def call_claude(api_key: str, prompt: str) -> str:
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text
+
+
+def build_prompt(chunks: list[str], wikilinks: list[str], filename: str) -> str:
+    wikilink_list = ", ".join(f"[[{w}]]" for w in wikilinks[:300])
+    text = "\n\n".join(chunks[:2])[:8000]
+
+    if wikilink_list:
+        wikilink_instruction = (
+            f"WICHTIG: Schreibe im Abschnitt ## Wikilinks IMMER mindestens 8 [[Wikilinks]] als kommagetrennte Liste.\n"
+            f"Verwende passende aus dieser Vault-Liste: {wikilink_list[:2000]}\n"
+            f"Und erkenne zusätzlich neue markante Konzepte, Theorien und Personen direkt aus dem Text."
+        )
+    else:
+        wikilink_instruction = (
+            "WICHTIG: Schreibe im Abschnitt ## Wikilinks IMMER mindestens 8 [[Wikilinks]] als kommagetrennte Liste.\n"
+            "Der Vault ist noch leer — erkenne selbst die wichtigsten Konzepte, Theorien und Personen aus dem Text."
+        )
+
+    return textwrap.dedent(f"""
+        Du bist ein Assistent der wissenschaftliche Texte in strukturierte Obsidian-Notizen umwandelt.
+
+        Erstelle eine vollständige Obsidian-Markdown-Notiz für das Dokument "{filename}".
+
+        Struktur (exakt so):
+        ---
+        title: [Titel]
+        author: [Autor(en)]
+        year: [Jahr]
+        tags:
+          - literature-note
+        ---
+
+        # [Titel]
+
+        ## Zusammenfassung
+        [2-4 Sätze Kernaussage]
+
+        ## Kernthesen
+        - [These 1]
+        - [These 2]
+        - ...
+
+        ## Wichtige Konzepte
+        - **[Konzept]**: [kurze Erklärung]
+        - ...
+
+        ## Wikilinks
+        [[Link1]], [[Link2]], [[Link3]], ...
+
+        {wikilink_instruction}
+
+        Dokumentinhalt:
+        {text}
+
+        Antworte NUR mit dem Markdown-Inhalt, ohne zusätzlichen Text.
+    """).strip()
+
+
+def derive_output_filename(raw_response: str, fallback: str) -> str:
+    author_match = re.search(r"author:\s*(.+)", raw_response)
+    year_match = re.search(r"year:\s*(\d{4})", raw_response)
+    title_match = re.search(r"title:\s*(.+)", raw_response)
+
+    author = author_match.group(1).strip().split(",")[0].strip() if author_match else ""
+    year = year_match.group(1).strip() if year_match else ""
+    title = title_match.group(1).strip()[:30] if title_match else fallback.replace(".pdf", "")
+
+    parts = [p for p in [author, year, title] if p]
+    raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
+    safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
+    return f"{safe_name}.md"
+
+
+# --- Endpoints ---
+
+@app.get("/")
+def root():
+    return FileResponse(Path(__file__).parent.parent / "frontend" / "index.html")
+
+
+@app.get("/config")
+def get_config():
+    cfg = load_config()
+    cfg.pop("claude_api_key", None)
+    return cfg
+
+
+@app.get("/config/has_api_key")
+def has_api_key():
+    cfg = load_config()
+    return {"has_key": bool(cfg.get("claude_api_key", "").strip())}
+
+
+class ConfigUpdate(BaseModel):
+    vault_path: str | None = None
+    default_model: str | None = None
+    claude_api_key: str | None = None
+    ollama_model: str | None = None
+
+
+@app.post("/config")
+def update_config(update: ConfigUpdate):
+    cfg = load_config()
+    if update.vault_path is not None:
+        cfg["vault_path"] = update.vault_path
+    if update.default_model is not None:
+        cfg["default_model"] = update.default_model
+    if update.claude_api_key is not None:
+        cfg["claude_api_key"] = update.claude_api_key
+    if update.ollama_model is not None:
+        cfg["ollama_model"] = update.ollama_model
+    save_config(cfg)
+    return {"ok": True}
+
+
+@app.get("/ollama/status")
+async def ollama_status():
+    cfg = load_config()
+    model = cfg.get("ollama_model", "llama3.1:8b")
+    available = await ollama_available(model)
+    return {"available": available, "model": model}
+
+
+@app.get("/wikilinks")
+def get_wikilinks():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        return {"links": [], "count": 0}
+    links = extract_wikilinks(vault_path)
+    return {"links": links, "count": len(links)}
+
+
+@app.post("/process")
+async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="empty_file")
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages_text = [page.get_text() for page in doc]
+        doc.close()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
+
+    full_text = "\n\n".join(pages_text).strip()
+    if len(full_text) < 100:
+        raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
+
+    chunks = chunk_text(full_text)
+    wikilinks = extract_wikilinks(vault_path)
+    prompt = build_prompt(chunks, wikilinks, file.filename or "document.pdf")
+
+    use_model = model if model != "auto" else cfg.get("default_model", "auto")
+    ollama_model = cfg.get("ollama_model", "llama3.1:8b")
+
+    if use_model == "auto":
+        if await ollama_available(ollama_model):
+            use_model = "ollama"
+        else:
+            use_model = "claude"
+
+    print(f"[mneme] PROMPT (erste 500):\n{prompt[:500]}\n")
+
+    if use_model == "ollama":
+        if not await ollama_available(ollama_model):
+            raise HTTPException(status_code=503, detail="ollama_unavailable")
+        result = await call_ollama(ollama_model, prompt)
+    elif use_model == "claude":
+        api_key = cfg.get("claude_api_key", "")
+        if not api_key.strip():
+            raise HTTPException(status_code=400, detail="claude_api_key_missing")
+        result = call_claude(api_key, prompt)
+
+    print(f"[mneme] RAW RESPONSE (erste 500):\n{result[:500]}\n")
+    wikilinks_section = re.search(r"## Wikilinks\s*\n(.*?)(?=\n##|\Z)", result, re.DOTALL)
+    print(f"[mneme] WIKILINKS SECTION: {wikilinks_section.group(1).strip() if wikilinks_section else 'nicht gefunden'}\n")
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
+
+    output_filename = derive_output_filename(result, file.filename or "document.pdf")
+    output_path = Path(vault_path) / output_filename
+    output_path.write_text(result, encoding="utf-8")
+
+    return {
+        "ok": True,
+        "filename": output_filename,
+        "model_used": use_model,
+        "wikilinks_available": len(wikilinks),
+        "chunks": len(chunks),
+    }
