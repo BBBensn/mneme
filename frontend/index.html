@@ -403,6 +403,7 @@
 <nav>
   <div class="nav-logo">mne<span>me</span></div>
   <div class="nav-right">
+    <div class="status-pill" id="version-pill" style="color:var(--text2);font-size:12px;opacity:0.7"></div>
     <div class="status-pill">
       <div class="status-dot" id="ollama-dot"></div>
       <span id="ollama-label">Ollama</span>
@@ -807,7 +808,16 @@
     toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
   }
 
+  async function checkVersion() {
+    try {
+      const r = await fetch(`${API}/version`);
+      const data = await r.json();
+      document.getElementById('version-pill').textContent = `v${data.version}`;
+    } catch {}
+  }
+
   // Init
+  checkVersion();
   checkOllama();
   checkVault();
   setInterval(checkOllama, 15000);

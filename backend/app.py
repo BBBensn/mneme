@@ -143,20 +143,15 @@ def build_metadata_prompt(text: str) -> str:
 
 def build_annotation_prompt(chunk: str, all_links: list[str]) -> str:
     link_list = ", ".join(f"[[{w}]]" for w in all_links[:300])
-    return textwrap.dedent(f"""
-        Du bekommst einen Ausschnitt eines wissenschaftlichen Textes.
-        Gib ihn VOLLSTÄNDIG und WORTGETREU zurück — ändere keinen einzigen Satz.
-        Füge NUR [[Wikilinks]] um relevante Begriffe ein: Personen, Konzepte, Theorien, Methoden, Institutionen, Fachbegriffe.
-
-        Regeln:
-        - Kein Wort hinzufügen, kein Wort entfernen, keine Umformulierung
-        - Nur [[ und ]] um bestehende Begriffe setzen
-        - Synonyme auf einen Link mappen: "working memory" → [[Arbeitsgedächtnis]]
-        - Bekannte Begriffe bevorzugt verlinken: {link_list if link_list else "(erkenne selbst)"}
-
-        Text:
-        {chunk}
-    """).strip()
+    return (
+        f"Du bekommst einen Ausschnitt eines wissenschaftlichen Textes.\n"
+        f"Gib den Text VOLLSTÄNDIG und WORTGETREU zurück.\n"
+        f"Verändere KEINEN Satz, KEIN Wort, KEINE Reihenfolge.\n"
+        f"Füge NUR [[Wikilinks]] bei relevanten Begriffen ein:\n"
+        f"Personen, Theorien, Konzepte, Methoden, Institutionen, Fachbegriffe.\n"
+        f"Bekannte Begriffe zum Verlinken: {link_list if link_list else '(erkenne selbst)'}\n\n"
+        f"Text:\n{chunk}"
+    )
 
 
 def parse_metadata(raw: str) -> dict:
@@ -219,6 +214,14 @@ def update_config(update: ConfigUpdate):
         cfg["ollama_model"] = update.ollama_model
     save_config(cfg)
     return {"ok": True}
+
+
+MNEME_VERSION = "1.5.0"
+
+
+@app.get("/version")
+def get_version():
+    return {"version": MNEME_VERSION}
 
 
 @app.get("/ollama/status")
@@ -319,6 +322,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         f"tags:\n"
         f"  - literature-note\n"
         f"source_pdf: {source_pdf}\n"
+        f"mneme_version: {MNEME_VERSION}\n"
         f"---\n"
     )
     result = frontmatter + "\n" + "\n\n".join(annotated_chunks)
