@@ -44,7 +44,6 @@ DEFAULT_CONFIG = {
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
-CHUNK_OVERLAP_WORDS = 200
 
 
 def load_config() -> dict:
@@ -64,14 +63,7 @@ def save_config(cfg: dict):
 
 def chunk_text(text: str) -> list[str]:
     words = text.split()
-    chunks = []
-    step = CHUNK_MAX_WORDS - CHUNK_OVERLAP_WORDS
-    for i in range(0, len(words), step):
-        chunk = " ".join(words[i : i + CHUNK_MAX_WORDS])
-        chunks.append(chunk)
-        if i + CHUNK_MAX_WORDS >= len(words):
-            break
-    return chunks
+    return [" ".join(words[i : i + CHUNK_MAX_WORDS]) for i in range(0, len(words), CHUNK_MAX_WORDS)]
 
 
 PSYCH_BASE_PATH = Path(__file__).parent / "psych_base_links.json"
@@ -124,94 +116,63 @@ def get_anthropic_key(cfg: dict) -> str:
     return os.getenv("ANTHROPIC_API_KEY", "") or cfg.get("claude_api_key", "")
 
 
-def call_claude(api_key: str, prompt: str) -> str:
+def call_claude(api_key: str, prompt: str, max_tokens: int = 8192) -> str:
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=4096,
+        max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text
 
 
-def build_prompt(chunks: list[str], vault_links: list[str], base_links: list[str], filename: str) -> str:
-    text = "\n\n".join(chunks[:2])[:8000]
-
-    all_links = sorted(set(vault_links) | set(base_links))
-    link_list = ", ".join(f"[[{w}]]" for w in all_links[:400])
-
+def build_metadata_prompt(text: str) -> str:
     return textwrap.dedent(f"""
-        Du bist ein Assistent der wissenschaftliche Texte in strukturierte Obsidian-Notizen umwandelt.
+        Extrahiere aus dem folgenden wissenschaftlichen Text:
+        - title: Titel des Werks
+        - author: Autor(en)
+        - year: Erscheinungsjahr (4-stellig)
 
-        Erstelle eine strukturierte Obsidian-Notiz für das Dokument "{filename}".
-
-        WIKILINK-REGELN (absolut verpflichtend):
-        - Setze [[Wikilinks]] direkt im Fließtext bei JEDEM relevanten Begriff: Konzepte, Theorien, Personen, Methoden, Schulen, Institutionen
-        - Ziel: mindestens 20 bis 50 Links verteilt über die gesamte Notiz — nicht am Ende gesammelt
-        - Alias-Logik: Synonyme und fremdsprachige Varianten auf denselben Begriff mappen, z.B. "working memory" → [[Arbeitsgedächtnis]], "self-concept" → [[Selbstkonzept]]
-        - Begriffe aus der Liste unten IMMER verlinken wenn sie im Text vorkommen
-        - Neue, im Text vorkommende Fachbegriffe ebenfalls verlinken, auch wenn nicht in der Liste
-
-        Bekannte Begriffe zum Verlinken (Vault + Basisliste):
-        {link_list if link_list else "(noch keine — erkenne alle relevanten Begriffe selbst)"}
-
-        Struktur (exakt so, Wikilinks überall im Fließtext):
-        ---
-        title: [Titel]
-        author: [Autor(en)]
-        year: [Jahr]
-        tags:
-          - literature-note
-        ---
-
-        # [Titel]
-
-        ## Zusammenfassung
-        [3-5 Sätze mit [[verlinkten]] Begriffen direkt im Text]
-
-        ## Kernthesen
-        - [These mit [[verlinkten]] Begriffen]
-        - [These mit [[verlinkten]] Begriffen]
-        - ...
-
-        ## Wichtige Konzepte
-        - **[[Konzept]]**: [Erklärung mit weiteren [[Links]]]
-        - ...
-
-        ## Methoden
-        - **[[Methode]]**: [kurze Beschreibung] (nur wenn relevant, sonst Abschnitt weglassen)
-
-        Dokumentinhalt:
-        {text}
-
-        Antworte NUR mit dem Markdown-Inhalt, ohne zusätzlichen Text davor oder danach.
-    """).strip()
-
-
-def build_linking_prompt(text: str, all_links: list[str]) -> str:
-    link_list = ", ".join(f"[[{w}]]" for w in all_links[:400])
-    return textwrap.dedent(f"""
-        Ersetze im folgenden Markdown-Text jeden relevanten Begriff, Namen, Theorie oder jedes Konzept mit [[Begriff]].
-        Behalte das YAML-Frontmatter und alle Markdown-Überschriften exakt bei.
-        Gib NUR den modifizierten Text zurück, ohne Erklärungen.
-
-        Bekannte Links (bevorzugt verwenden wenn passend):
-        {link_list if link_list else "(keine — erkenne selbst)"}
+        Antworte NUR als JSON: {{"title": "...", "author": "...", "year": "..."}}
+        Wenn ein Feld nicht erkennbar ist: leerer String.
 
         Text:
-        {text}
+        {text[:3000]}
     """).strip()
 
 
-def derive_output_filename(raw_response: str, fallback: str) -> str:
-    author_match = re.search(r"author:\s*(.+)", raw_response)
-    year_match = re.search(r"year:\s*(\d{4})", raw_response)
-    title_match = re.search(r"title:\s*(.+)", raw_response)
+def build_annotation_prompt(chunk: str, all_links: list[str]) -> str:
+    link_list = ", ".join(f"[[{w}]]" for w in all_links[:300])
+    return textwrap.dedent(f"""
+        Du bekommst einen Ausschnitt eines wissenschaftlichen Textes.
+        Gib ihn VOLLSTÄNDIG und WORTGETREU zurück — ändere keinen einzigen Satz.
+        Füge NUR [[Wikilinks]] um relevante Begriffe ein: Personen, Konzepte, Theorien, Methoden, Institutionen, Fachbegriffe.
 
-    author = author_match.group(1).strip().split(",")[0].strip() if author_match else ""
-    year = year_match.group(1).strip() if year_match else ""
-    title = title_match.group(1).strip()[:30] if title_match else fallback.replace(".pdf", "")
+        Regeln:
+        - Kein Wort hinzufügen, kein Wort entfernen, keine Umformulierung
+        - Nur [[ und ]] um bestehende Begriffe setzen
+        - Synonyme auf einen Link mappen: "working memory" → [[Arbeitsgedächtnis]]
+        - Bekannte Begriffe bevorzugt verlinken: {link_list if link_list else "(erkenne selbst)"}
 
+        Text:
+        {chunk}
+    """).strip()
+
+
+def parse_metadata(raw: str) -> dict:
+    try:
+        m = re.search(r'\{.*?\}', raw, re.DOTALL)
+        if m:
+            return json.loads(m.group())
+    except Exception:
+        pass
+    return {"title": "", "author": "", "year": ""}
+
+
+def derive_output_filename(meta: dict, fallback: str) -> str:
+    author = meta.get("author", "").split(",")[0].strip()[:30]
+    year = meta.get("year", "")
+    title = meta.get("title", "").strip()[:30]
     parts = [p for p in [author, year, title] if p]
     raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
     safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
@@ -304,13 +265,12 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     chunks = chunk_text(full_text)
     vault_links = extract_wikilinks(vault_path)
     base_links = load_psych_base_links()
-    prompt = build_prompt(chunks, vault_links, base_links, file.filename or "document.pdf")
+    all_links = sorted(set(vault_links) | set(base_links))
 
     requested = model if model != "auto" else cfg.get("default_model", "auto")
     ollama_model = cfg.get("ollama_model", "llama3.1:8b")
     api_key = get_anthropic_key(cfg)
 
-    # Resolve effective model: Claude primary, Ollama fallback
     if requested == "auto":
         use_model = "claude" if api_key.strip() else "ollama"
     elif requested == "claude":
@@ -320,13 +280,12 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     else:
         use_model = "ollama"
 
-    logger.info("MODEL: %s | FILE: %s", use_model, file.filename)
-    logger.info("PROMPT (erste 500):\n%s", prompt[:500])
+    logger.info("MODEL: %s | FILE: %s | CHUNKS: %d", use_model, file.filename, len(chunks))
 
-    async def run_stage(p: str) -> str:
+    async def run_call(p: str, max_tokens: int = 8192) -> str:
         if use_model == "claude":
             try:
-                return call_claude(api_key, p)
+                return call_claude(api_key, p, max_tokens=max_tokens)
             except Exception as e:
                 logger.warning("Claude fehlgeschlagen (%s), Fallback auf Ollama", e)
                 if not await ollama_available(ollama_model):
@@ -337,19 +296,37 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
                 raise HTTPException(status_code=503, detail="ollama_unavailable")
             return await call_ollama(ollama_model, p)
 
-    stage1 = await run_stage(prompt)
-    logger.info("STAGE 1 (erste 500):\n%s", stage1[:500])
+    # Metadata extraction
+    meta_raw = await run_call(build_metadata_prompt(full_text), max_tokens=256)
+    meta = parse_metadata(meta_raw)
+    logger.info("METADATA: %s", meta)
 
-    all_links = sorted(set(vault_links) | set(base_links))
-    linking_prompt = build_linking_prompt(stage1, all_links)
+    # Annotate each chunk individually
+    annotated_chunks = []
+    for i, chunk in enumerate(chunks):
+        annotated = await run_call(build_annotation_prompt(chunk, all_links))
+        link_count = len(re.findall(r"\[\[.+?\]\]", annotated))
+        logger.info("CHUNK %d/%d: %d Links", i + 1, len(chunks), link_count)
+        annotated_chunks.append(annotated)
 
-    result = await run_stage(linking_prompt)
+    # Assemble: frontmatter + full annotated text
+    source_pdf = file.filename or "document.pdf"
+    frontmatter = (
+        f"---\n"
+        f"title: {meta.get('title', '')}\n"
+        f"author: {meta.get('author', '')}\n"
+        f"year: {meta.get('year', '')}\n"
+        f"tags:\n"
+        f"  - literature-note\n"
+        f"source_pdf: {source_pdf}\n"
+        f"---\n"
+    )
+    result = frontmatter + "\n" + "\n\n".join(annotated_chunks)
 
-    link_count = len(re.findall(r"\[\[.+?\]\]", result))
-    logger.info("STAGE 2 (erste 500):\n%s", result[:500])
-    logger.info("WIKILINKS IM OUTPUT: %d Links", link_count)
+    total_links = len(re.findall(r"\[\[.+?\]\]", result))
+    logger.info("TOTAL LINKS: %d", total_links)
 
-    output_filename = derive_output_filename(result, file.filename or "document.pdf")
+    output_filename = derive_output_filename(meta, source_pdf)
     output_path = Path(vault_path) / output_filename
     output_path.write_text(result, encoding="utf-8")
 
@@ -357,6 +334,6 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         "ok": True,
         "filename": output_filename,
         "model_used": use_model,
-        "wikilinks_available": len(vault_links) + len(base_links),
+        "wikilinks_total": total_links,
         "chunks": len(chunks),
     }
