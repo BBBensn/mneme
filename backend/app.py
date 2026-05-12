@@ -61,6 +61,16 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
+PSYCH_BASE_PATH = Path(__file__).parent / "psych_base_links.json"
+
+
+def load_psych_base_links() -> list[str]:
+    try:
+        return json.loads(PSYCH_BASE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
 def extract_wikilinks(vault_path: str) -> list[str]:
     links = set()
     pattern = re.compile(r"\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]")
@@ -106,28 +116,28 @@ def call_claude(api_key: str, prompt: str) -> str:
     return message.content[0].text
 
 
-def build_prompt(chunks: list[str], wikilinks: list[str], filename: str) -> str:
-    wikilink_list = ", ".join(f"[[{w}]]" for w in wikilinks[:300])
+def build_prompt(chunks: list[str], vault_links: list[str], base_links: list[str], filename: str) -> str:
     text = "\n\n".join(chunks[:2])[:8000]
 
-    if wikilink_list:
-        wikilink_instruction = (
-            f"WICHTIG: Schreibe im Abschnitt ## Wikilinks IMMER mindestens 8 [[Wikilinks]] als kommagetrennte Liste.\n"
-            f"Verwende passende aus dieser Vault-Liste: {wikilink_list[:2000]}\n"
-            f"Und erkenne zusätzlich neue markante Konzepte, Theorien und Personen direkt aus dem Text."
-        )
-    else:
-        wikilink_instruction = (
-            "WICHTIG: Schreibe im Abschnitt ## Wikilinks IMMER mindestens 8 [[Wikilinks]] als kommagetrennte Liste.\n"
-            "Der Vault ist noch leer — erkenne selbst die wichtigsten Konzepte, Theorien und Personen aus dem Text."
-        )
+    all_links = sorted(set(vault_links) | set(base_links))
+    link_list = ", ".join(f"[[{w}]]" for w in all_links[:400])
 
     return textwrap.dedent(f"""
         Du bist ein Assistent der wissenschaftliche Texte in strukturierte Obsidian-Notizen umwandelt.
 
-        Erstelle eine vollständige Obsidian-Markdown-Notiz für das Dokument "{filename}".
+        Erstelle eine strukturierte Obsidian-Notiz für das Dokument "{filename}".
 
-        Struktur (exakt so):
+        WIKILINK-REGELN (absolut verpflichtend):
+        - Setze [[Wikilinks]] direkt im Fließtext bei JEDEM relevanten Begriff: Konzepte, Theorien, Personen, Methoden, Schulen, Institutionen
+        - Ziel: mindestens 20 bis 50 Links verteilt über die gesamte Notiz — nicht am Ende gesammelt
+        - Alias-Logik: Synonyme und fremdsprachige Varianten auf denselben Begriff mappen, z.B. "working memory" → [[Arbeitsgedächtnis]], "self-concept" → [[Selbstkonzept]]
+        - Begriffe aus der Liste unten IMMER verlinken wenn sie im Text vorkommen
+        - Neue, im Text vorkommende Fachbegriffe ebenfalls verlinken, auch wenn nicht in der Liste
+
+        Bekannte Begriffe zum Verlinken (Vault + Basisliste):
+        {link_list if link_list else "(noch keine — erkenne alle relevanten Begriffe selbst)"}
+
+        Struktur (exakt so, Wikilinks überall im Fließtext):
         ---
         title: [Titel]
         author: [Autor(en)]
@@ -139,26 +149,24 @@ def build_prompt(chunks: list[str], wikilinks: list[str], filename: str) -> str:
         # [Titel]
 
         ## Zusammenfassung
-        [2-4 Sätze Kernaussage]
+        [3-5 Sätze mit [[verlinkten]] Begriffen direkt im Text]
 
         ## Kernthesen
-        - [These 1]
-        - [These 2]
+        - [These mit [[verlinkten]] Begriffen]
+        - [These mit [[verlinkten]] Begriffen]
         - ...
 
         ## Wichtige Konzepte
-        - **[Konzept]**: [kurze Erklärung]
+        - **[[Konzept]]**: [Erklärung mit weiteren [[Links]]]
         - ...
 
-        ## Wikilinks
-        [[Link1]], [[Link2]], [[Link3]], ...
-
-        {wikilink_instruction}
+        ## Methoden
+        - **[[Methode]]**: [kurze Beschreibung] (nur wenn relevant, sonst Abschnitt weglassen)
 
         Dokumentinhalt:
         {text}
 
-        Antworte NUR mit dem Markdown-Inhalt, ohne zusätzlichen Text.
+        Antworte NUR mit dem Markdown-Inhalt, ohne zusätzlichen Text davor oder danach.
     """).strip()
 
 
@@ -261,8 +269,9 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
 
     chunks = chunk_text(full_text)
-    wikilinks = extract_wikilinks(vault_path)
-    prompt = build_prompt(chunks, wikilinks, file.filename or "document.pdf")
+    vault_links = extract_wikilinks(vault_path)
+    base_links = load_psych_base_links()
+    prompt = build_prompt(chunks, vault_links, base_links, file.filename or "document.pdf")
 
     use_model = model if model != "auto" else cfg.get("default_model", "auto")
     ollama_model = cfg.get("ollama_model", "llama3.1:8b")
@@ -288,8 +297,8 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
 
     print(f"[mneme] RAW RESPONSE (erste 500):\n{result[:500]}\n")
-    wikilinks_section = re.search(r"## Wikilinks\s*\n(.*?)(?=\n##|\Z)", result, re.DOTALL)
-    print(f"[mneme] WIKILINKS SECTION: {wikilinks_section.group(1).strip() if wikilinks_section else 'nicht gefunden'}\n")
+    link_count = len(re.findall(r"\[\[.+?\]\]", result))
+    print(f"[mneme] WIKILINKS IM OUTPUT: {link_count} Links gefunden\n")
 
     output_filename = derive_output_filename(result, file.filename or "document.pdf")
     output_path = Path(vault_path) / output_filename
@@ -299,6 +308,6 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         "ok": True,
         "filename": output_filename,
         "model_used": use_model,
-        "wikilinks_available": len(wikilinks),
+        "wikilinks_available": len(vault_links) + len(base_links),
         "chunks": len(chunks),
     }
