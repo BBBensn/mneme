@@ -735,9 +735,12 @@
         }
       } catch {}
 
+      const stubStr = data.stubs_created > 0
+        ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt`
+        : '';
       setStatus('success',
         `Notiz erstellt: <strong>${data.filename}</strong><br>` +
-        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_total} Wikilinks gesetzt${costStr}`
+        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_total} Wikilinks gesetzt${costStr}${stubStr}`
       );
       showToast('Notiz gespeichert ✓');
       loadVaultTree();

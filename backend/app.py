@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import os
@@ -45,8 +46,8 @@ DEFAULT_CONFIG = {
 OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
 TOKENS_FILENAME = "tokens.json"
-HAIKU_PRICE_INPUT = 0.00025   # USD per 1K tokens
-HAIKU_PRICE_OUTPUT = 0.00125  # USD per 1K tokens
+HAIKU_PRICE_INPUT_PER_TOKEN = 0.0000008    # USD/token  ($0.80/MTok)
+HAIKU_PRICE_OUTPUT_PER_TOKEN = 0.000004    # USD/token  ($4.00/MTok)
 EUR_RATE = 0.92
 
 _last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
@@ -189,31 +190,42 @@ def parse_terms(raw: str) -> list[dict]:
     return []
 
 
-def expand_german_inflections(canonical: str) -> set[str]:
+_UMLAUT = {'a': 'ä', 'o': 'ö', 'u': 'ü', 'A': 'Ä', 'O': 'Ö', 'U': 'Ü'}
+_SUFFIXES = ['s', 'es', 'e', 'en', 'er', 'ern', 'em']
+
+
+def expand_german_inflections(canonical: str, full_text: str = "") -> set[str]:
     forms = {canonical}
     if len(canonical) < 4:
         return forms
     c = canonical
-    if c[-1] not in ('s', 'ß', 'x', 'z'):
-        forms.add(c + 's')
-    forms.add(c + 'es')
-    forms.add(c + 'e')
-    forms.add(c + 'en')
-    forms.add(c + 'er')
-    forms.add(c + 'ern')
+    for suffix in _SUFFIXES:
+        forms.add(c + suffix)
+    # Umlaut: replace last a/o/u in stem, then add plural suffixes
+    for i in range(len(c) - 1, -1, -1):
+        if c[i] in _UMLAUT:
+            stem = c[:i] + _UMLAUT[c[i]] + c[i + 1:]
+            forms.add(stem)
+            for suffix in _SUFFIXES:
+                forms.add(stem + suffix)
+            break
+    # Filter to only forms that actually occur in text (prevents "Soziologiee" etc.)
+    if full_text:
+        text_lower = full_text.lower()
+        return {f for f in forms if f == canonical or f.lower() in text_lower}
     return forms
 
 
-def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links: list[str]) -> list[dict]:
+def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links: list[str], full_text: str = "") -> list[dict]:
     canonical_map: dict[str, set] = {}
     for terms in term_lists:
         for t in terms:
             c = t["canonical"]
             aliases = set(t.get("aliases", [c]))
-            aliases.update(expand_german_inflections(c))
+            aliases.update(expand_german_inflections(c, full_text))
             canonical_map.setdefault(c, set()).update(aliases)
     for link in base_links + vault_links:
-        inflected = expand_german_inflections(link)
+        inflected = expand_german_inflections(link, full_text)
         if link in canonical_map:
             canonical_map[link].update(inflected)
         else:
@@ -227,7 +239,10 @@ def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links
 def load_token_cache(vault_path: str) -> dict[str, list[str]]:
     path = Path(vault_path) / TOKENS_FILENAME
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("_mneme_version") != MNEME_VERSION:
+            return {}
+        return {k: v for k, v in data.items() if not k.startswith("_")}
     except Exception:
         return {}
 
@@ -240,6 +255,7 @@ def save_token_cache(vault_path: str, terms: list[dict]):
         existing = set(cache.get(canonical, []))
         existing.update(term.get("aliases", [canonical]))
         cache[canonical] = sorted(existing)
+    cache["_mneme_version"] = MNEME_VERSION
     path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -312,6 +328,47 @@ def derive_output_filename(meta: dict, fallback: str) -> str:
     return f"{safe_name}.md"
 
 
+_METHOD_KEYWORDS = {"methode", "analyse", "forschung", "ansatz", "verfahren"}
+
+
+def get_stub_folder(name: str) -> str:
+    parts = name.split()
+    if (len(parts) == 2 and
+            all(p[0].isupper() and p.replace('-', '').isalpha() for p in parts)):
+        return "Personen"
+    if any(kw in name.lower() for kw in _METHOD_KEYWORDS):
+        return "Methoden"
+    return "Konzepte"
+
+
+def create_stubs(vault_path: str, wikilinks: set[str], source_filename: str) -> tuple[int, int]:
+    vault = Path(vault_path)
+    today = datetime.date.today().isoformat()
+    source_stem = Path(source_filename).stem
+    existing_names = {f.stem for f in vault.rglob("*.md")}
+    created = 0
+    existing = 0
+    for name in sorted(wikilinks):
+        safe = re.sub(r'[<>:"/\\|?*\n\r]', '', name).strip()
+        if not safe or len(safe) < 2:
+            continue
+        if safe in existing_names:
+            existing += 1
+            continue
+        folder = get_stub_folder(safe)
+        stub_dir = vault / folder
+        stub_dir.mkdir(exist_ok=True)
+        content = (
+            f"---\ntitle: {safe}\ntags:\n  - concept\ncreated: {today}\n---\n"
+            f"# {safe}\n\n"
+            f"> Stub — noch kein Inhalt. Verlinkt in: [[{source_stem}]]\n"
+        )
+        (stub_dir / f"{safe}.md").write_text(content, encoding="utf-8")
+        existing_names.add(safe)
+        created += 1
+    return created, existing
+
+
 # --- Endpoints ---
 
 @app.get("/")
@@ -354,7 +411,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "1.7.0"
+MNEME_VERSION = "1.8.0"
 
 
 @app.get("/version")
@@ -366,7 +423,7 @@ def get_version():
 def last_run_cost():
     inp = _last_run_stats["input_tokens"]
     out = _last_run_stats["output_tokens"]
-    cost_usd = (inp / 1000 * HAIKU_PRICE_INPUT) + (out / 1000 * HAIKU_PRICE_OUTPUT)
+    cost_usd = inp * HAIKU_PRICE_INPUT_PER_TOKEN + out * HAIKU_PRICE_OUTPUT_PER_TOKEN
     cost_eur = cost_usd * EUR_RATE
     return {
         "input_tokens": inp,
@@ -504,7 +561,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         logger.info("CHUNK %d/%d: %d Begriffe erkannt", i + 1, len(chunks), len(terms))
         term_lists.append(terms)
 
-    all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links)
+    all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links, full_text)
     logger.info("TERMS GESAMT: %d (davon %d aus Cache)", len(all_terms), len(cached_terms))
 
     # Phase 2 — Python ersetzt Begriffe im Originaltext (0 weitere API-Calls)
@@ -532,10 +589,17 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     output_path = Path(vault_path) / output_filename
     output_path.write_text(result, encoding="utf-8")
 
+    # Stubs für neue Wikilinks anlegen
+    found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', result))
+    stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename)
+    logger.info("STUBS: %d erstellt, %d existieren", stubs_created, stubs_existing)
+
     return {
         "ok": True,
         "filename": output_filename,
         "model_used": use_model,
         "wikilinks_total": total_links,
         "chunks": len(chunks),
+        "stubs_created": stubs_created,
+        "stubs_existing": stubs_existing,
     }
