@@ -284,12 +284,12 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         if not api_key.strip():
             raise HTTPException(status_code=400, detail="claude_api_key_missing")
         result = call_claude(api_key, prompt)
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
 
     print(f"[mneme] RAW RESPONSE (erste 500):\n{result[:500]}\n")
     wikilinks_section = re.search(r"## Wikilinks\s*\n(.*?)(?=\n##|\Z)", result, re.DOTALL)
     print(f"[mneme] WIKILINKS SECTION: {wikilinks_section.group(1).strip() if wikilinks_section else 'nicht gefunden'}\n")
-    else:
-        raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
 
     output_filename = derive_output_filename(result, file.filename or "document.pdf")
     output_path = Path(vault_path) / output_filename
