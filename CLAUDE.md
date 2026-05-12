@@ -36,9 +36,9 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 
 ## Services & Ports
 
-| Dienst  | Port | Start              |
-|---------|------|--------------------|
-| Backend | 5050 | uvicorn app:app    |
+| Dienst  | Port | Start                             |
+|---------|------|-----------------------------------|
+| Backend | 5050 | uvicorn app:app --port 5050 --reload |
 
 ---
 

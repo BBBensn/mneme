@@ -1,6 +1,8 @@
 import json
+import logging
 import re
 import textwrap
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import anthropic
@@ -10,6 +12,13 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+LOG_PATH = Path(__file__).parent / "mneme.log"
+_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+logger = logging.getLogger("mneme")
+logger.setLevel(logging.DEBUG)
+logger.addHandler(_handler)
 
 app = FastAPI()
 
@@ -170,6 +179,21 @@ def build_prompt(chunks: list[str], vault_links: list[str], base_links: list[str
     """).strip()
 
 
+def build_linking_prompt(text: str, all_links: list[str]) -> str:
+    link_list = ", ".join(f"[[{w}]]" for w in all_links[:400])
+    return textwrap.dedent(f"""
+        Ersetze im folgenden Markdown-Text jeden relevanten Begriff, Namen, Theorie oder jedes Konzept mit [[Begriff]].
+        Behalte das YAML-Frontmatter und alle Markdown-Überschriften exakt bei.
+        Gib NUR den modifizierten Text zurück, ohne Erklärungen.
+
+        Bekannte Links (bevorzugt verwenden wenn passend):
+        {link_list if link_list else "(keine — erkenne selbst)"}
+
+        Text:
+        {text}
+    """).strip()
+
+
 def derive_output_filename(raw_response: str, fallback: str) -> str:
     author_match = re.search(r"author:\s*(.+)", raw_response)
     year_match = re.search(r"year:\s*(\d{4})", raw_response)
@@ -282,23 +306,34 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         else:
             use_model = "claude"
 
-    print(f"[mneme] PROMPT (erste 500):\n{prompt[:500]}\n")
+    logger.info("PROMPT (erste 500):\n%s", prompt[:500])
 
     if use_model == "ollama":
         if not await ollama_available(ollama_model):
             raise HTTPException(status_code=503, detail="ollama_unavailable")
-        result = await call_ollama(ollama_model, prompt)
+        stage1 = await call_ollama(ollama_model, prompt)
     elif use_model == "claude":
         api_key = cfg.get("claude_api_key", "")
         if not api_key.strip():
             raise HTTPException(status_code=400, detail="claude_api_key_missing")
-        result = call_claude(api_key, prompt)
+        stage1 = call_claude(api_key, prompt)
     else:
         raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
 
-    print(f"[mneme] RAW RESPONSE (erste 500):\n{result[:500]}\n")
+    logger.info("STAGE 1 (erste 500):\n%s", stage1[:500])
+
+    all_links = sorted(set(vault_links) | set(base_links))
+    linking_prompt = build_linking_prompt(stage1, all_links)
+
+    if use_model == "ollama":
+        result = await call_ollama(ollama_model, linking_prompt)
+    else:
+        api_key = cfg.get("claude_api_key", "")
+        result = call_claude(api_key, linking_prompt)
+
     link_count = len(re.findall(r"\[\[.+?\]\]", result))
-    print(f"[mneme] WIKILINKS IM OUTPUT: {link_count} Links gefunden\n")
+    logger.info("STAGE 2 (erste 500):\n%s", result[:500])
+    logger.info("WIKILINKS IM OUTPUT: %d Links", link_count)
 
     output_filename = derive_output_filename(result, file.filename or "document.pdf")
     output_path = Path(vault_path) / output_filename
