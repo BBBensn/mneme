@@ -396,6 +396,29 @@
     }
     #vault-banner.visible { display: block; }
     #vault-banner a { color: var(--accent); text-decoration: none; cursor: pointer; font-weight: 500; }
+
+    /* Vault tree */
+    .tree-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+    .tree-toggle-row:hover .card-title { color: var(--accent); }
+    .tree-chevron { font-size: 11px; color: var(--text2); transition: transform 0.2s; }
+    .tree-chevron.open { transform: rotate(90deg); }
+    .tree-body { display: none; margin-top: 16px; }
+    .tree-body.open { display: block; }
+    .tree-node { font-size: 13px; line-height: 1.9; }
+    .tree-dir { display: flex; align-items: center; gap: 5px; cursor: pointer; color: var(--text); font-weight: 500; }
+    .tree-dir:hover { color: var(--accent); }
+    .tree-dir-arrow { font-size: 9px; color: var(--text2); transition: transform 0.15s; width: 12px; }
+    .tree-dir-arrow.open { transform: rotate(90deg); }
+    .tree-children { display: none; padding-left: 16px; }
+    .tree-children.open { display: block; }
+    .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tree-file:hover { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -467,6 +490,19 @@
     <div id="status-box"></div>
 
     <button class="btn-primary" id="btn-process" disabled>Verarbeiten</button>
+
+    <div class="card" id="vault-tree-card" style="display:none">
+      <div class="tree-toggle-row" id="tree-toggle-row">
+        <div class="card-title" style="margin-bottom:0">Vault</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="tree-file-count" style="font-size:12px;color:var(--text2)"></span>
+          <span class="tree-chevron" id="tree-chevron">▶</span>
+        </div>
+      </div>
+      <div class="tree-body" id="tree-body">
+        <div id="file-tree"></div>
+      </div>
+    </div>
 
   </div>
 
@@ -687,11 +723,24 @@
         return;
       }
 
+      let costStr = '';
+      try {
+        const costR = await fetch(`${API}/last_run_cost`);
+        const cost = await costR.json();
+        if (cost.input_tokens > 0) {
+          const eur = (cost.cost_eur * 100).toFixed(2);
+          const inK = (cost.input_tokens / 1000).toFixed(1);
+          const outK = (cost.output_tokens / 1000).toFixed(1);
+          costStr = `<br>Kosten: ~${eur}¢ (${inK}K in / ${outK}K out · ${cost.calls} Calls)`;
+        }
+      } catch {}
+
       setStatus('success',
         `Notiz erstellt: <strong>${data.filename}</strong><br>` +
-        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_total} Wikilinks gesetzt`
+        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_total} Wikilinks gesetzt${costStr}`
       );
       showToast('Notiz gespeichert ✓');
+      loadVaultTree();
       resetDrop();
     } catch (e) {
       setStatus('error', `Verbindung zum Backend fehlgeschlagen. Läuft uvicorn auf Port 5050?`);
@@ -816,10 +865,63 @@
     } catch {}
   }
 
+  // Vault tree
+  function renderTreeNodes(nodes) {
+    if (!nodes || !nodes.length) return '';
+    return nodes.map(node => {
+      if (node.type === 'dir') {
+        const id = 'td-' + Math.random().toString(36).slice(2);
+        return `<div class="tree-node">
+          <div class="tree-dir" data-target="${id}">
+            <span class="tree-dir-arrow" id="arr-${id}">▶</span>${node.name}
+          </div>
+          <div class="tree-children" id="${id}">${renderTreeNodes(node.children)}</div>
+        </div>`;
+      } else {
+        return `<span class="tree-file" data-path="${node.path}" title="${node.path}">${node.name}</span>`;
+      }
+    }).join('');
+  }
+
+  async function loadVaultTree() {
+    try {
+      const r = await fetch(`${API}/vault/tree`);
+      const data = await r.json();
+      if (!data.total) return;
+
+      const card = document.getElementById('vault-tree-card');
+      card.style.display = 'block';
+      document.getElementById('tree-file-count').textContent = `${data.total} Dateien`;
+      document.getElementById('file-tree').innerHTML = renderTreeNodes(data.tree);
+
+      document.getElementById('tree-toggle-row').addEventListener('click', () => {
+        const body = document.getElementById('tree-body');
+        const chev = document.getElementById('tree-chevron');
+        const open = body.classList.toggle('open');
+        chev.classList.toggle('open', open);
+      });
+
+      document.getElementById('file-tree').addEventListener('click', e => {
+        const dir = e.target.closest('.tree-dir');
+        if (dir) {
+          const id = dir.dataset.target;
+          const children = document.getElementById(id);
+          const arrow = document.getElementById('arr-' + id);
+          const open = children.classList.toggle('open');
+          arrow.classList.toggle('open', open);
+          return;
+        }
+        const file = e.target.closest('.tree-file');
+        if (file) showToast(file.dataset.path);
+      });
+    } catch {}
+  }
+
   // Init
   checkVersion();
   checkOllama();
   checkVault();
+  loadVaultTree();
   setInterval(checkOllama, 15000);
 </script>
 </body>

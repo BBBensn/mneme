@@ -44,6 +44,12 @@ DEFAULT_CONFIG = {
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
+TOKENS_FILENAME = "tokens.json"
+HAIKU_PRICE_INPUT = 0.00025   # USD per 1K tokens
+HAIKU_PRICE_OUTPUT = 0.00125  # USD per 1K tokens
+EUR_RATE = 0.92
+
+_last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
 
 
 def load_config() -> dict:
@@ -117,12 +123,16 @@ def get_anthropic_key(cfg: dict) -> str:
 
 
 def call_claude(api_key: str, prompt: str, max_tokens: int = 8192) -> str:
+    global _last_run_stats
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
+    _last_run_stats["input_tokens"] += message.usage.input_tokens
+    _last_run_stats["output_tokens"] += message.usage.output_tokens
+    _last_run_stats["calls"] += 1
     return message.content[0].text
 
 
@@ -149,8 +159,10 @@ def build_recognition_prompt(chunk: str) -> str:
         '[{"canonical": "Kanonische Form", "aliases": ["Variante1", "Variante2"]}, ...]\n'
         "Regeln:\n"
         "- Nur Begriffe die wirklich im Text vorkommen\n"
-        "- canonical = Grundform/Hauptform des Begriffs\n"
-        "- aliases = Flexionen, Synonyme, fremdsprachige Varianten aus dem Text\n"
+        "- canonical = Nominativ Singular (Grundform)\n"
+        "- aliases = ALLE im Text vorkommenden Flexionen: Genitiv (-s/-es), Plural (-e/-en/-er/-ø), Akkusativ, Dativ\n"
+        "  Beispiel: canonical 'Denkraum' → aliases ['Denkraum', 'Denkraums', 'Denkraumes', 'Denkräume', 'Denkräumen']\n"
+        "- Auch fremdsprachige Varianten und Synonyme in aliases aufnehmen\n"
         "- Füge canonical immer auch in aliases ein\n"
         "- Antworte NUR mit dem JSON-Array, ohne Erklärungen\n\n"
         f"Text:\n{chunk}"
@@ -177,18 +189,58 @@ def parse_terms(raw: str) -> list[dict]:
     return []
 
 
+def expand_german_inflections(canonical: str) -> set[str]:
+    forms = {canonical}
+    if len(canonical) < 4:
+        return forms
+    c = canonical
+    if c[-1] not in ('s', 'ß', 'x', 'z'):
+        forms.add(c + 's')
+    forms.add(c + 'es')
+    forms.add(c + 'e')
+    forms.add(c + 'en')
+    forms.add(c + 'er')
+    forms.add(c + 'ern')
+    return forms
+
+
 def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links: list[str]) -> list[dict]:
     canonical_map: dict[str, set] = {}
     for terms in term_lists:
         for t in terms:
             c = t["canonical"]
-            canonical_map.setdefault(c, set()).update(t.get("aliases", [c]))
+            aliases = set(t.get("aliases", [c]))
+            aliases.update(expand_german_inflections(c))
+            canonical_map.setdefault(c, set()).update(aliases)
     for link in base_links + vault_links:
-        canonical_map.setdefault(link, {link})
+        inflected = expand_german_inflections(link)
+        if link in canonical_map:
+            canonical_map[link].update(inflected)
+        else:
+            canonical_map[link] = inflected
     return [
         {"canonical": c, "aliases": sorted(aliases)}
         for c, aliases in canonical_map.items()
     ]
+
+
+def load_token_cache(vault_path: str) -> dict[str, list[str]]:
+    path = Path(vault_path) / TOKENS_FILENAME
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_token_cache(vault_path: str, terms: list[dict]):
+    path = Path(vault_path) / TOKENS_FILENAME
+    cache = load_token_cache(vault_path)
+    for term in terms:
+        canonical = term["canonical"]
+        existing = set(cache.get(canonical, []))
+        existing.update(term.get("aliases", [canonical]))
+        cache[canonical] = sorted(existing)
+    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _tag_line(line: str, alias_lower_map: dict, combined_pattern) -> str:
@@ -302,12 +354,61 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "1.6.0"
+MNEME_VERSION = "1.7.0"
 
 
 @app.get("/version")
 def get_version():
     return {"version": MNEME_VERSION}
+
+
+@app.get("/last_run_cost")
+def last_run_cost():
+    inp = _last_run_stats["input_tokens"]
+    out = _last_run_stats["output_tokens"]
+    cost_usd = (inp / 1000 * HAIKU_PRICE_INPUT) + (out / 1000 * HAIKU_PRICE_OUTPUT)
+    cost_eur = cost_usd * EUR_RATE
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cost_usd": round(cost_usd, 5),
+        "cost_eur": round(cost_eur, 5),
+        "calls": _last_run_stats["calls"],
+    }
+
+
+@app.get("/vault/tree")
+def get_vault_tree():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        return {"tree": [], "total": 0}
+
+    def build_tree(path: Path, depth: int = 0) -> list:
+        if depth >= 3:
+            return []
+        items = []
+        try:
+            for entry in sorted(path.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+                if entry.name.startswith('.') or entry.name == TOKENS_FILENAME:
+                    continue
+                if entry.is_dir():
+                    children = build_tree(entry, depth + 1)
+                    if children:
+                        items.append({"name": entry.name, "type": "dir", "children": children})
+                elif entry.suffix == '.md':
+                    items.append({
+                        "name": entry.name,
+                        "type": "file",
+                        "path": str(entry.relative_to(Path(vault_path))),
+                    })
+        except PermissionError:
+            pass
+        return items
+
+    tree = build_tree(Path(vault_path))
+    total = sum(1 for _ in Path(vault_path).rglob("*.md"))
+    return {"tree": tree, "total": total}
 
 
 @app.get("/ollama/status")
@@ -368,6 +469,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     else:
         use_model = "ollama"
 
+    _last_run_stats.update({"input_tokens": 0, "output_tokens": 0, "calls": 0})
     logger.info("MODEL: %s | FILE: %s | CHUNKS: %d", use_model, file.filename, len(chunks))
 
     async def run_call(p: str, max_tokens: int = 1024) -> str:
@@ -384,12 +486,17 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
                 raise HTTPException(status_code=503, detail="ollama_unavailable")
             return await call_ollama(ollama_model, p)
 
+    # Phase 0: Token-Cache laden (bekannte Begriffe aus früheren Runs)
+    token_cache = load_token_cache(vault_path)
+    cached_terms = [{"canonical": c, "aliases": aliases} for c, aliases in token_cache.items()]
+    logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
+
     # Phase 1a — Metadata
     meta_raw = await run_call(build_metadata_prompt(full_text), max_tokens=256)
     meta = parse_metadata(meta_raw)
     logger.info("METADATA: %s", meta)
 
-    # Phase 1b — Term recognition per chunk (KI liefert nur JSON-Liste, kein Volltext)
+    # Phase 1b — KI erkennt neue Begriffe pro Chunk
     term_lists = []
     for i, chunk in enumerate(chunks):
         raw = await run_call(build_recognition_prompt(chunk), max_tokens=1024)
@@ -397,8 +504,8 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         logger.info("CHUNK %d/%d: %d Begriffe erkannt", i + 1, len(chunks), len(terms))
         term_lists.append(terms)
 
-    all_terms = merge_terms(term_lists, base_links, vault_links)
-    logger.info("TERMS GESAMT: %d", len(all_terms))
+    all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links)
+    logger.info("TERMS GESAMT: %d (davon %d aus Cache)", len(all_terms), len(cached_terms))
 
     # Phase 2 — Python ersetzt Begriffe im Originaltext (0 weitere API-Calls)
     source_pdf = file.filename or "document.pdf"
@@ -416,8 +523,11 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     result = apply_wikilinks(frontmatter + full_text, all_terms)
 
     total_links = len(re.findall(r"\[\[.+?\]\]", result))
-    logger.info("TOTAL LINKS: %d | TERMS: %d", total_links, len(all_terms))
+    logger.info("TOTAL LINKS: %d | TERMS: %d | TOKENS in/out: %d/%d",
+                total_links, len(all_terms),
+                _last_run_stats["input_tokens"], _last_run_stats["output_tokens"])
 
+    save_token_cache(vault_path, all_terms)
     output_filename = derive_output_filename(meta, source_pdf)
     output_path = Path(vault_path) / output_filename
     output_path.write_text(result, encoding="utf-8")
