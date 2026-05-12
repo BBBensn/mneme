@@ -120,6 +120,7 @@ async def call_ollama(model: str, prompt: str) -> str:
 
 
 def get_anthropic_key(cfg: dict) -> str:
+    load_dotenv(Path(__file__).parent.parent / ".env", override=True)
     return os.getenv("ANTHROPIC_API_KEY", "") or cfg.get("claude_api_key", "")
 
 
@@ -234,7 +235,7 @@ def get_config():
 @app.get("/config/has_api_key")
 def has_api_key():
     cfg = load_config()
-    return {"has_key": bool(cfg.get("claude_api_key", "").strip())}
+    return {"has_key": bool(get_anthropic_key(cfg).strip())}
 
 
 class ConfigUpdate(BaseModel):
