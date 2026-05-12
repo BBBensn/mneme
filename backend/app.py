@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import textwrap
 from logging.handlers import RotatingFileHandler
@@ -8,10 +9,13 @@ from pathlib import Path
 import anthropic
 import fitz  # pymupdf
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 LOG_PATH = Path(__file__).parent / "mneme.log"
 _handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
@@ -115,10 +119,14 @@ async def call_ollama(model: str, prompt: str) -> str:
         return r.json()["response"]
 
 
+def get_anthropic_key(cfg: dict) -> str:
+    return os.getenv("ANTHROPIC_API_KEY", "") or cfg.get("claude_api_key", "")
+
+
 def call_claude(api_key: str, prompt: str) -> str:
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
-        model="claude-haiku-4-5",
+        model="claude-haiku-4-5-20251001",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -297,39 +305,44 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     base_links = load_psych_base_links()
     prompt = build_prompt(chunks, vault_links, base_links, file.filename or "document.pdf")
 
-    use_model = model if model != "auto" else cfg.get("default_model", "auto")
+    requested = model if model != "auto" else cfg.get("default_model", "auto")
     ollama_model = cfg.get("ollama_model", "llama3.1:8b")
+    api_key = get_anthropic_key(cfg)
 
-    if use_model == "auto":
-        if await ollama_available(ollama_model):
-            use_model = "ollama"
-        else:
-            use_model = "claude"
-
-    logger.info("PROMPT (erste 500):\n%s", prompt[:500])
-
-    if use_model == "ollama":
-        if not await ollama_available(ollama_model):
-            raise HTTPException(status_code=503, detail="ollama_unavailable")
-        stage1 = await call_ollama(ollama_model, prompt)
-    elif use_model == "claude":
-        api_key = cfg.get("claude_api_key", "")
+    # Resolve effective model: Claude primary, Ollama fallback
+    if requested == "auto":
+        use_model = "claude" if api_key.strip() else "ollama"
+    elif requested == "claude":
         if not api_key.strip():
             raise HTTPException(status_code=400, detail="claude_api_key_missing")
-        stage1 = call_claude(api_key, prompt)
+        use_model = "claude"
     else:
-        raise HTTPException(status_code=400, detail=f"unknown_model: {use_model}")
+        use_model = "ollama"
 
+    logger.info("MODEL: %s | FILE: %s", use_model, file.filename)
+    logger.info("PROMPT (erste 500):\n%s", prompt[:500])
+
+    async def run_stage(p: str) -> str:
+        if use_model == "claude":
+            try:
+                return call_claude(api_key, p)
+            except Exception as e:
+                logger.warning("Claude fehlgeschlagen (%s), Fallback auf Ollama", e)
+                if not await ollama_available(ollama_model):
+                    raise HTTPException(status_code=503, detail="claude_error_and_ollama_unavailable")
+                return await call_ollama(ollama_model, p)
+        else:
+            if not await ollama_available(ollama_model):
+                raise HTTPException(status_code=503, detail="ollama_unavailable")
+            return await call_ollama(ollama_model, p)
+
+    stage1 = await run_stage(prompt)
     logger.info("STAGE 1 (erste 500):\n%s", stage1[:500])
 
     all_links = sorted(set(vault_links) | set(base_links))
     linking_prompt = build_linking_prompt(stage1, all_links)
 
-    if use_model == "ollama":
-        result = await call_ollama(ollama_model, linking_prompt)
-    else:
-        api_key = cfg.get("claude_api_key", "")
-        result = call_claude(api_key, linking_prompt)
+    result = await run_stage(linking_prompt)
 
     link_count = len(re.findall(r"\[\[.+?\]\]", result))
     logger.info("STAGE 2 (erste 500):\n%s", result[:500])
