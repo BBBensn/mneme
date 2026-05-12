@@ -141,17 +141,103 @@ def build_metadata_prompt(text: str) -> str:
     """).strip()
 
 
-def build_annotation_prompt(chunk: str, all_links: list[str]) -> str:
-    link_list = ", ".join(f"[[{w}]]" for w in all_links[:300])
+def build_recognition_prompt(chunk: str) -> str:
     return (
-        f"Du bekommst einen Ausschnitt eines wissenschaftlichen Textes.\n"
-        f"Gib den Text VOLLSTÄNDIG und WORTGETREU zurück.\n"
-        f"Verändere KEINEN Satz, KEIN Wort, KEINE Reihenfolge.\n"
-        f"Füge NUR [[Wikilinks]] bei relevanten Begriffen ein:\n"
-        f"Personen, Theorien, Konzepte, Methoden, Institutionen, Fachbegriffe.\n"
-        f"Bekannte Begriffe zum Verlinken: {link_list if link_list else '(erkenne selbst)'}\n\n"
+        "Analysiere den folgenden wissenschaftlichen Text.\n"
+        "Identifiziere alle relevanten Fachbegriffe, Personen, Konzepte, Theorien und Methoden.\n"
+        "Gib eine JSON-Liste zurück. Format:\n"
+        '[{"canonical": "Kanonische Form", "aliases": ["Variante1", "Variante2"]}, ...]\n'
+        "Regeln:\n"
+        "- Nur Begriffe die wirklich im Text vorkommen\n"
+        "- canonical = Grundform/Hauptform des Begriffs\n"
+        "- aliases = Flexionen, Synonyme, fremdsprachige Varianten aus dem Text\n"
+        "- Füge canonical immer auch in aliases ein\n"
+        "- Antworte NUR mit dem JSON-Array, ohne Erklärungen\n\n"
         f"Text:\n{chunk}"
     )
+
+
+def parse_terms(raw: str) -> list[dict]:
+    try:
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if m:
+            items = json.loads(m.group())
+            result = []
+            for t in items:
+                if not isinstance(t, dict) or "canonical" not in t:
+                    continue
+                canonical = str(t["canonical"]).strip()
+                aliases = [str(a).strip() for a in t.get("aliases", [])]
+                if canonical not in aliases:
+                    aliases.insert(0, canonical)
+                result.append({"canonical": canonical, "aliases": aliases})
+            return result
+    except Exception:
+        pass
+    return []
+
+
+def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links: list[str]) -> list[dict]:
+    canonical_map: dict[str, set] = {}
+    for terms in term_lists:
+        for t in terms:
+            c = t["canonical"]
+            canonical_map.setdefault(c, set()).update(t.get("aliases", [c]))
+    for link in base_links + vault_links:
+        canonical_map.setdefault(link, {link})
+    return [
+        {"canonical": c, "aliases": sorted(aliases)}
+        for c, aliases in canonical_map.items()
+    ]
+
+
+def _tag_line(line: str, alias_lower_map: dict, combined_pattern) -> str:
+    def replacer(m: re.Match) -> str:
+        s = m.group(0)
+        if s.startswith("[["):
+            return s
+        canonical = alias_lower_map.get(s.lower())
+        if canonical is None:
+            return s
+        return f"[[{canonical}]]" if s == canonical else f"[[{canonical}|{s}]]"
+    return combined_pattern.sub(replacer, line)
+
+
+def apply_wikilinks(text: str, terms: list[dict]) -> str:
+    # Isolate YAML frontmatter — never tag inside it
+    yaml_end = 0
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            yaml_end = end + 5
+    yaml_part = text[:yaml_end]
+    body = text[yaml_end:]
+
+    # Build alias → canonical map, ignore very short strings
+    alias_lower_map: dict[str, str] = {}
+    for term in terms:
+        canonical = term["canonical"]
+        for alias in term.get("aliases", [canonical]):
+            if len(alias) >= 4:
+                alias_lower_map[alias.lower()] = canonical
+
+    if not alias_lower_map:
+        return text
+
+    # Longest-match-first: longer aliases take precedence (e.g. "Cognitive Load Theory" > "Theorie")
+    sorted_aliases = sorted(alias_lower_map.keys(), key=len, reverse=True)
+    link_pat = r'\[\[.*?\]\]'
+    alias_pats = [r'\b' + re.escape(a) + r'\b' for a in sorted_aliases]
+    combined_pattern = re.compile('(' + '|'.join([link_pat] + alias_pats) + ')', re.IGNORECASE)
+
+    result_lines = []
+    for line in body.split('\n'):
+        if line.startswith(('#', '>')):
+            result_lines.append(line)
+        else:
+            result_lines.append(_tag_line(line, alias_lower_map, combined_pattern))
+
+    return yaml_part + '\n'.join(result_lines)
 
 
 def parse_metadata(raw: str) -> dict:
@@ -216,7 +302,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "1.5.0"
+MNEME_VERSION = "1.6.0"
 
 
 @app.get("/version")
@@ -268,7 +354,6 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     chunks = chunk_text(full_text)
     vault_links = extract_wikilinks(vault_path)
     base_links = load_psych_base_links()
-    all_links = sorted(set(vault_links) | set(base_links))
 
     requested = model if model != "auto" else cfg.get("default_model", "auto")
     ollama_model = cfg.get("ollama_model", "llama3.1:8b")
@@ -285,7 +370,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
 
     logger.info("MODEL: %s | FILE: %s | CHUNKS: %d", use_model, file.filename, len(chunks))
 
-    async def run_call(p: str, max_tokens: int = 8192) -> str:
+    async def run_call(p: str, max_tokens: int = 1024) -> str:
         if use_model == "claude":
             try:
                 return call_claude(api_key, p, max_tokens=max_tokens)
@@ -299,20 +384,23 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
                 raise HTTPException(status_code=503, detail="ollama_unavailable")
             return await call_ollama(ollama_model, p)
 
-    # Metadata extraction
+    # Phase 1a — Metadata
     meta_raw = await run_call(build_metadata_prompt(full_text), max_tokens=256)
     meta = parse_metadata(meta_raw)
     logger.info("METADATA: %s", meta)
 
-    # Annotate each chunk individually
-    annotated_chunks = []
+    # Phase 1b — Term recognition per chunk (KI liefert nur JSON-Liste, kein Volltext)
+    term_lists = []
     for i, chunk in enumerate(chunks):
-        annotated = await run_call(build_annotation_prompt(chunk, all_links))
-        link_count = len(re.findall(r"\[\[.+?\]\]", annotated))
-        logger.info("CHUNK %d/%d: %d Links", i + 1, len(chunks), link_count)
-        annotated_chunks.append(annotated)
+        raw = await run_call(build_recognition_prompt(chunk), max_tokens=1024)
+        terms = parse_terms(raw)
+        logger.info("CHUNK %d/%d: %d Begriffe erkannt", i + 1, len(chunks), len(terms))
+        term_lists.append(terms)
 
-    # Assemble: frontmatter + full annotated text
+    all_terms = merge_terms(term_lists, base_links, vault_links)
+    logger.info("TERMS GESAMT: %d", len(all_terms))
+
+    # Phase 2 — Python ersetzt Begriffe im Originaltext (0 weitere API-Calls)
     source_pdf = file.filename or "document.pdf"
     frontmatter = (
         f"---\n"
@@ -323,12 +411,12 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         f"  - literature-note\n"
         f"source_pdf: {source_pdf}\n"
         f"mneme_version: {MNEME_VERSION}\n"
-        f"---\n"
+        f"---\n\n"
     )
-    result = frontmatter + "\n" + "\n\n".join(annotated_chunks)
+    result = apply_wikilinks(frontmatter + full_text, all_terms)
 
     total_links = len(re.findall(r"\[\[.+?\]\]", result))
-    logger.info("TOTAL LINKS: %d", total_links)
+    logger.info("TOTAL LINKS: %d | TERMS: %d", total_links, len(all_terms))
 
     output_filename = derive_output_filename(meta, source_pdf)
     output_path = Path(vault_path) / output_filename
