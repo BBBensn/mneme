@@ -325,13 +325,25 @@ def merge_terms(term_lists: list[list[dict]], base_links: list[str], vault_links
     ]
 
 
-def load_token_cache(vault_path: str) -> dict[str, list[str]]:
+def load_token_cache(vault_path: str) -> dict[str, dict]:
+    """Returns canonical → {type, aliases, translations, forms}. Handles old flat and new format."""
     path = Path(vault_path) / TOKENS_FILENAME
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("_mneme_version") != MNEME_VERSION:
-            return {}
-        return {k: v for k, v in data.items() if not k.startswith("_")}
+        result = {}
+        for k, v in data.items():
+            if k.startswith("_"):
+                continue
+            if isinstance(v, list):
+                result[k] = {"type": None, "aliases": v, "translations": {}, "forms": list(v)}
+            elif isinstance(v, dict):
+                result[k] = {
+                    "type": v.get("type"),
+                    "aliases": v.get("aliases", [k]),
+                    "translations": v.get("translations", {}),
+                    "forms": v.get("forms", v.get("aliases", [k])),
+                }
+        return result
     except Exception:
         return {}
 
@@ -341,9 +353,16 @@ def save_token_cache(vault_path: str, terms: list[dict]):
     cache = load_token_cache(vault_path)
     for term in terms:
         canonical = term["canonical"]
-        existing = set(cache.get(canonical, []))
-        existing.update(term.get("aliases", [canonical]))
-        cache[canonical] = sorted(existing)
+        existing = cache.get(canonical, {"type": None, "aliases": [], "translations": {}, "forms": []})
+        new_aliases = sorted(set(existing.get("aliases", [])) | set(term.get("aliases", [canonical])))
+        new_translations = {**existing.get("translations", {}), **term.get("translations", {})}
+        new_forms = sorted(set(new_aliases) | set(new_translations.values()))
+        cache[canonical] = {
+            "type": term.get("type") or existing.get("type"),
+            "aliases": new_aliases,
+            "translations": new_translations,
+            "forms": new_forms,
+        }
     cache["_mneme_version"] = MNEME_VERSION
     path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -480,7 +499,7 @@ def cleanup_existing_stubs(vault_path: str) -> int:
         for md_file in (Path(vault_path) / folder).glob("*.md"):
             try:
                 content = md_file.read_text(encoding="utf-8")
-                if not content.startswith("---\n") or "- concept" not in content[:300]:
+                if not content.startswith("---\n") or not any(t in content[:300] for t in ("- concept", "- person", "- method")):
                     continue
                 end = content.find("\n---\n", 4)
                 if end == -1:
@@ -540,6 +559,49 @@ def count_backlinks(vault_path: str, term: str) -> int:
     return count
 
 
+def update_author_stub(vault_path: str, author: str, work: dict, affiliation: str = ""):
+    """Create or update author stub in Personen/ with works list."""
+    safe_name = re.sub(r'[<>:"/\\|?*\n\r]', '', author.split(",")[0].strip()[:50]).strip()
+    if len(safe_name) < 2:
+        return
+    stub_path = Path(vault_path) / "Personen" / f"{safe_name}.md"
+    today = datetime.date.today().isoformat()
+
+    work_lines = ""
+    if work.get("title"):
+        work_lines += f'  - title: "{work["title"]}"\n'
+    if work.get("year"):
+        work_lines += f'    year: {work["year"]}\n'
+    if work.get("file"):
+        work_lines += f'    file: "[[{work["file"]}]]"\n'
+    if work.get("doi"):
+        work_lines += f'    doi: "{work["doi"]}"\n'
+    if not work_lines:
+        return
+
+    if stub_path.exists():
+        content = stub_path.read_text(encoding="utf-8")
+        fm_end = content.find("\n---\n", 4) if content.startswith("---\n") else -1
+        if fm_end == -1:
+            return
+        works_pos = content.find("\nworks:\n")
+        if works_pos != -1 and works_pos < fm_end:
+            insert_pos = works_pos + len("\nworks:\n")
+            content = content[:insert_pos] + work_lines + content[insert_pos:]
+        else:
+            content = content[:fm_end] + f"\nworks:\n{work_lines.rstrip()}" + content[fm_end:]
+        stub_path.write_text(content, encoding="utf-8")
+    else:
+        (Path(vault_path) / "Personen").mkdir(exist_ok=True)
+        aff_line = f'affiliation: "{affiliation}"\n' if affiliation else ""
+        content = (
+            f"---\ntitle: {safe_name}\ntype: person\ntags:\n  - person\n  - author\n"
+            f"{aff_line}works:\n{work_lines}"
+            f"created: {today}\n---\n"
+        )
+        stub_path.write_text(content, encoding="utf-8")
+
+
 def build_combined_prompt(term_list: list[str], context_text: str) -> str:
     terms_section = (
         "Begriffe von Ollama (roh, unbereinigt):\n" + "\n".join(f"- {t}" for t in term_list)
@@ -551,14 +613,24 @@ def build_combined_prompt(term_list: list[str], context_text: str) -> str:
         "Deine Aufgaben:\n"
         "1. BEREINIGUNG: Entferne Noise (URLs, Impressum, Abbildungsreferenzen, generische Wörter ohne Fachbezug)\n"
         "2. NORMALISIERUNG: Fasse zusammen was zusammengehört (Imdahl + Max Imdahl → Max Imdahl)\n"
-        "3. ERGÄNZUNG: Füge wichtige Begriffe hinzu die in der Liste fehlen aber im Text stehen\n"
+        "3. ERGÄNZUNG: Füge wichtige Begriffe hinzu die im Text stehen aber fehlen\n"
         "4. KLASSIFIZIERUNG: Markiere jeden Begriff als person / concept / method (oder null)\n"
-        "5. METADATEN: Extrahiere title, author, year, journal (falls vorhanden), doi (falls vorhanden)\n\n"
+        "5. ÜBERSETZUNG: Gib für jeden Begriff die deutsche (de) und englische (en) Form an\n"
+        "6. METADATEN:\n"
+        "   - title: NUR der eigentliche Werktitel. NICHT der erste Satz des Abstracts.\n"
+        "     Titel steht meist auf Seite 1, vor dem Autorennamen, kürzer als 15 Wörter.\n"
+        "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
+        "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
+        "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n\n"
         "Antworte NUR mit folgendem JSON (kein anderer Text, keine Markdown-Blöcke):\n"
-        '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", "doi": ""},\n'
+        '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", '
+        '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "..."},\n'
         ' "tokens": [\n'
-        '   {"term": "Max Imdahl", "type": "person", "aliases": ["Imdahl", "Max Imdahls"], "keep": true},\n'
-        '   {"term": "www.verlag.de", "type": null, "aliases": [], "keep": false}\n'
+        '   {"term": "Max Imdahl", "type": "person", "aliases": ["Imdahl"], '
+        '"de": "Max Imdahl", "en": "Max Imdahl", "keep": true},\n'
+        '   {"term": "Lernen", "type": "concept", "aliases": ["Lernens"], '
+        '"de": "Lernen", "en": "Learning", "keep": true},\n'
+        '   {"term": "www.verlag.de", "type": null, "aliases": [], "de": "", "en": "", "keep": false}\n'
         " ]}\n\n"
         "keep: true = sinnvoller Wikilink-Begriff | keep: false = Noise\n\n"
         f"{terms_section}\n\n"
@@ -574,12 +646,16 @@ def parse_combined_response(raw: str) -> tuple[dict, list[dict]]:
             return {}, []
         data = json.loads(m.group())
         md = data.get("metadata", {}) or {}
+        title_raw = md.get("title")
         metadata = {
-            "title": str(md.get("title") or ""),
+            "title": "" if (title_raw is None or str(title_raw).lower() == "null") else str(title_raw),
             "author": str(md.get("author") or ""),
             "year": str(md.get("year") or ""),
             "journal": str(md.get("journal") or ""),
             "doi": str(md.get("doi") or ""),
+            "affiliation": str(md.get("affiliation") or ""),
+            "citation_apa": str(md.get("citation_apa") or ""),
+            "citation_chicago": str(md.get("citation_chicago") or ""),
         }
         tokens = []
         for t in data.get("tokens", []):
@@ -591,11 +667,19 @@ def parse_combined_response(raw: str) -> tuple[dict, list[dict]]:
             aliases = [str(a).strip() for a in (t.get("aliases") or []) if a]
             if term not in aliases:
                 aliases.insert(0, term)
+            de = str(t.get("de") or "").strip()
+            en = str(t.get("en") or "").strip()
+            translations = {}
+            if de:
+                translations["de"] = de
+            if en and en.lower() != de.lower():
+                translations["en"] = en
             tokens.append({
                 "canonical": term,
                 "aliases": aliases,
                 "type": t.get("type"),
                 "keep": bool(t.get("keep", True)),
+                "translations": translations,
             })
         return metadata, tokens
     except Exception as e:
@@ -765,7 +849,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.3.0"
+MNEME_VERSION = "2.4.0"
 
 
 @app.get("/version")
@@ -813,9 +897,29 @@ def merge_token_terms(req: MergeRequest):
         raise HTTPException(status_code=404, detail="tokens_not_found")
     if req.keep not in data or req.remove not in data:
         raise HTTPException(status_code=404, detail="term_not_found")
-    keep_al = set(data[req.keep]) if isinstance(data[req.keep], list) else set()
-    remove_al = set(data[req.remove]) if isinstance(data[req.remove], list) else set()
-    data[req.keep] = sorted(keep_al | remove_al | {req.remove})
+    def _get_aliases(entry) -> set:
+        if isinstance(entry, list):
+            return set(entry)
+        if isinstance(entry, dict):
+            return set(entry.get("aliases", []))
+        return set()
+
+    keep_entry = data[req.keep]
+    remove_entry = data[req.remove]
+    keep_al = _get_aliases(keep_entry)
+    remove_al = _get_aliases(remove_entry)
+    merged_aliases = sorted(keep_al | remove_al | {req.remove})
+
+    if isinstance(keep_entry, dict):
+        remove_translations = remove_entry.get("translations", {}) if isinstance(remove_entry, dict) else {}
+        merged_translations = {**remove_translations, **keep_entry.get("translations", {})}
+        merged_forms = sorted(set(keep_entry.get("forms", [])) |
+                              set(remove_entry.get("forms", []) if isinstance(remove_entry, dict) else []) |
+                              {req.remove})
+        data[req.keep] = {**keep_entry, "aliases": merged_aliases,
+                          "translations": merged_translations, "forms": merged_forms}
+    else:
+        data[req.keep] = merged_aliases
     del data[req.remove]
     tok_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     # Replace all [[req.remove]] links throughout the vault
@@ -950,8 +1054,17 @@ def confirm_process(req: ConfirmRequest):
     term_types = {t["canonical"]: t.get("type") for t in selected_new}
     found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', content))
     stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename, term_types)
-    logger.info("CONFIRMED: %d links | %d stubs | %s", total_links, stubs_created, output_filename)
 
+    meta = draft.get("meta", {})
+    if meta.get("author"):
+        update_author_stub(vault_path, meta["author"], {
+            "title": meta.get("title", ""),
+            "year": meta.get("year", ""),
+            "file": output_filename.replace(".md", ""),
+            "doi": meta.get("doi", ""),
+        }, meta.get("affiliation", ""))
+
+    logger.info("CONFIRMED: %d links | %d stubs | %s", total_links, stubs_created, output_filename)
     _pending_draft = None
     return {
         "ok": True,
@@ -979,6 +1092,59 @@ def quality_pass(req: QualityPassRequest):
         logger.warning("Quality pass fehlgeschlagen: %s", e)
         raise HTTPException(status_code=500, detail=f"quality_pass_error: {e}")
     return {"remove": [str(r) for r in remove]}
+
+
+@app.get("/authors")
+def get_authors():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path:
+        return {"authors": [], "count": 0}
+    personen_dir = Path(vault_path) / "Personen"
+    if not personen_dir.is_dir():
+        return {"authors": [], "count": 0}
+    authors = []
+    for md_file in sorted(personen_dir.glob("*.md")):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            if "author" in content[:300]:
+                authors.append({
+                    "name": md_file.stem,
+                    "file": str(md_file.relative_to(Path(vault_path))),
+                })
+        except Exception:
+            pass
+    return {"authors": authors, "count": len(authors)}
+
+
+@app.post("/tokens/migrate")
+def migrate_tokens():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    tok_path = Path(vault_path) / TOKENS_FILENAME
+    if not tok_path.exists():
+        return {"ok": True, "migrated": 0, "already_new": 0, "message": "Keine tokens.json gefunden"}
+    try:
+        data = json.loads(tok_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="tokens_read_error")
+    flat_terms = [k for k, v in data.items() if not k.startswith("_") and isinstance(v, list)]
+    if not flat_terms:
+        return {"ok": True, "migrated": 0, "already_new": len([k for k in data if not k.startswith("_")]),
+                "message": "Bereits im neuen Format"}
+    new_data = {"_mneme_version": MNEME_VERSION}
+    for k, v in data.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, list):
+            new_data[k] = {"type": None, "aliases": v, "translations": {}, "forms": list(v)}
+        else:
+            new_data[k] = v
+    tok_path.write_text(json.dumps(new_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "migrated": len(flat_terms), "already_new": 0,
+            "message": f"{len(flat_terms)} Begriffe ins neue Format migriert"}
 
 
 @app.get("/vault/raw_pdfs")
@@ -1087,6 +1253,14 @@ def bulk_confirm(req: BulkConfirmRequest):
             term_types = {t["canonical"]: t.get("type") for t in selected_new}
             found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', content))
             stubs_created, _ = create_stubs(vault_path, found_links, output_filename, term_types)
+            draft_meta = draft.get("meta", {})
+            if draft_meta.get("author"):
+                update_author_stub(vault_path, draft_meta["author"], {
+                    "title": draft_meta.get("title", ""),
+                    "year": draft_meta.get("year", ""),
+                    "file": output_filename.replace(".md", ""),
+                    "doi": draft_meta.get("doi", ""),
+                }, draft_meta.get("affiliation", ""))
             confirmed.append({"filename": output_filename, "stubs_created": stubs_created})
         except Exception as e:
             errors.append({"filename": draft["output_filename"], "error": str(e)})
@@ -1210,13 +1384,16 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
 
     # Phase 0: Token-Cache
     token_cache = load_token_cache(vault_path)
-    cached_terms = [{"canonical": c, "aliases": aliases} for c, aliases in token_cache.items()]
+    cached_terms = [
+        {"canonical": c, "aliases": entry.get("forms", entry.get("aliases", [c]))}
+        for c, entry in token_cache.items()
+    ]
     cached_canonical = set(token_cache.keys())
     logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
 
     chunks_count = 0
     meta: dict = {}
-    # {canonical, aliases, type, keep}
+    # {canonical, aliases, type, keep, translations}
     claude_tokens: list[dict] = []
 
     # === AUTO MODE: Ollama → single Claude quality-pass call ===
@@ -1272,9 +1449,9 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
         raw_list = [{"canonical": t, "aliases": [t]} for t in unique_raw]
         kept, filtered = filter_noisy_terms(raw_list)
         claude_tokens = (
-            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": True}
+            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": True, "translations": {}}
              for t in kept] +
-            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": False}
+            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": False, "translations": {}}
              for t in filtered]
         )
 
@@ -1305,16 +1482,19 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
         unique_new = [t for t in raw_new if t["canonical"] not in cached_canonical]
         kept, filtered = filter_noisy_terms(unique_new)
         claude_tokens = (
-            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": True}
+            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": True, "translations": {}}
              for t in kept] +
-            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": False}
+            [{"canonical": t["canonical"], "aliases": t["aliases"], "type": None, "keep": False, "translations": {}}
              for t in filtered]
         )
 
     # Fallback: if metadata empty, try regex
     if not any(meta.get(k) for k in ("title", "author", "year")):
         meta = extract_metadata_regex(full_text)
-    logger.info("METADATA: %s (via %s)", meta, meta_model)
+    # Title fallback: use filename if Claude returned null or empty
+    if not meta.get("title") or meta.get("title") == "null":
+        meta["title"] = re.sub(r'[_\-.]', ' ', Path(filename).stem)[:80].strip()
+    logger.info("METADATA: %s (via %s)", {k: v for k, v in meta.items() if k != "citation_chicago"}, meta_model)
 
     # Phase 3: Text structuring + wikilink application
     _stage("Wikilinks werden gesetzt...", 0.82)
@@ -1330,11 +1510,17 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
     if references:
         sections_text += f"\n\n## Literatur\n\n{references}"
 
-    frontmatter = f"---\ntitle: {meta.get('title', '')}\nauthor: {meta.get('author', '')}\nyear: {meta.get('year', '')}\n"
-    if meta.get("journal"):
-        frontmatter += f"journal: {meta['journal']}\n"
-    if meta.get("doi"):
-        frontmatter += f"doi: {meta['doi']}\n"
+    frontmatter = (
+        f"---\ntitle: {meta.get('title', '')}\nauthor: {meta.get('author', '')}\n"
+        f"year: {meta.get('year', '')}\n"
+    )
+    for fld in ("journal", "doi", "affiliation"):
+        if meta.get(fld):
+            frontmatter += f"{fld}: {meta[fld]}\n"
+    if meta.get("citation_apa"):
+        frontmatter += f'citation_apa: "{meta["citation_apa"]}"\n'
+    if meta.get("citation_chicago"):
+        frontmatter += f'citation_chicago: "{meta["citation_chicago"]}"\n'
     frontmatter += f"tags:\n  - literature-note\nsource_pdf: {filename}\nmneme_version: {MNEME_VERSION}\n---\n\n"
 
     preview_content = apply_wikilinks(frontmatter + sections_text, preview_terms)
@@ -1373,7 +1559,8 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
         "output_filename": output_filename,
         "cached_terms": cached_terms,
         "new_terms": [
-            {"canonical": t["canonical"], "aliases": t["aliases"], "type": t.get("type")}
+            {"canonical": t["canonical"], "aliases": t["aliases"], "type": t.get("type"),
+             "translations": t.get("translations", {})}
             for t in claude_tokens
             if t["canonical"] not in cached_canonical
         ],
@@ -1381,6 +1568,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
         "vault_links": vault_links,
         "token_list": token_list,
         "duplicate_suggestions": dup_suggestions,
+        "meta": meta,
         "stats": {
             "links_total": total_links,
             "filtered": filtered_count,
@@ -1388,6 +1576,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
             "existing": len(cached_terms),
             "model_used": f"{phase1_model}/{meta_model}",
             "chunks": chunks_count,
+            "citation_apa": meta.get("citation_apa", ""),
         },
         "cost": {
             "input_tokens": _last_run_stats["input_tokens"],
