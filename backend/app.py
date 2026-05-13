@@ -53,6 +53,19 @@ EUR_RATE = 0.92
 
 _last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0,
                          "phase1_model": "", "meta_model": ""}
+_processing_status: dict = {"active": False, "stage": "", "progress": 0.0,
+                             "chunk_current": 0, "chunk_total": 0}
+
+_IMPRINT_BLACKLIST = frozenset({
+    "abonnement", "anzeigen", "verlag", "issn", "doi", "isbn", "druck",
+    "abonnentenbetreuung", "visdp", "erscheinen", "erscheinungsweise",
+    "impressum", "redaktion", "herausgeber", "chefredakteur", "erscheinungsort",
+    "druckerei", "bezugspreis", "einzelheft", "jahresabonnement",
+})
+_FIGURE_PREFIXES = ("abbildung", "abb.", "fig.", "tab.", "tabelle")
+_NAME_PATTERN = re.compile(
+    r'^[A-ZÄÖÜ][a-zäöüß]+(?:[\s\-][A-ZÄÖÜ]\.?)?(?:\s+[A-ZÄÖÜ][a-zäöüß]+)+$'
+)
 
 
 def load_config() -> dict:
@@ -156,13 +169,15 @@ def build_metadata_prompt(text: str) -> str:
 
 def build_recognition_prompt(chunk: str) -> str:
     return (
-        "Analysiere den folgenden wissenschaftlichen Text.\n"
-        "Identifiziere ALLE verlinkungswürdigen Begriffe. Im Zweifel: taggen. Lieber zu viele als zu wenige.\n"
-        "Erfasse ausdrücklich:\n"
-        "- Alle Eigennamen (auch Nachname allein wenn eindeutig: 'Warburg', 'Imdahl')\n"
-        "- Alle Fachbegriffe auch scheinbar allgemeine: 'Wahrnehmung', 'Reflexion', 'Emotion' sind Fachbegriffe!\n"
-        "- Institutionen, Zeitschriften, Werktitel\n"
-        "- Komposita wenn sie als Konzept fungieren\n"
+        "Du analysierst einen wissenschaftlichen Text. Liste ALLE relevanten Begriffe auf — sei großzügig.\n"
+        "Tagge ALLE der folgenden:\n"
+        "- Alle Personennamen (auch Nachnamen allein: 'Warburg', 'Imdahl', 'Husserl', 'Bourdieu')\n"
+        "- Alle Institutionen, Zeitschriften, Orte, Verlage\n"
+        "- Alle Fachbegriffe — auch wenn scheinbar allgemein: 'Wahrnehmung', 'Reflexion', 'Emotion', "
+        "'Gedächtnis', 'Aufmerksamkeit' SIND Fachbegriffe in diesem Kontext!\n"
+        "- Alle Konzepte, Theorien, Methoden, Werktitel\n"
+        "- Alle Komposita die als eigenständige Konzepte fungieren\n"
+        "Gib MINDESTENS 30 Begriffe zurück. Im Zweifel: lieber zu viele als zu wenige.\n"
         "Gib eine JSON-Liste zurück. Format:\n"
         '[{"canonical": "Kanonische Form", "aliases": ["Variante1", "Variante2"]}, ...]\n'
         "- canonical = Nominativ Singular (Grundform)\n"
@@ -190,7 +205,17 @@ def parse_terms_simple(raw: str) -> list[dict]:
     seen: set[str] = set()
     for part in re.split(r'[,\n]', raw):
         term = re.sub(r'^[\s\-•–*#\d.]+', '', part).strip()
-        if len(term) >= 2 and term not in seen:
+        if len(term) < 4:
+            continue
+        if not re.search(r'[A-Za-zÄÖÜäöüß]', term):
+            continue
+        if re.search(r'\d', term):
+            continue
+        if term.lower() in _IMPRINT_BLACKLIST:
+            continue
+        if any(term.lower().startswith(p) for p in _FIGURE_PREFIXES):
+            continue
+        if term not in seen:
             seen.add(term)
             result.append({"canonical": term, "aliases": [term]})
     return result
@@ -198,15 +223,38 @@ def parse_terms_simple(raw: str) -> list[dict]:
 
 def extract_metadata_regex(text: str) -> dict:
     """Fallback metadata extraction without API."""
-    year_m = re.search(r'\b(19[0-9]{2}|20[0-2][0-9])\b', text[:3000])
+    excerpt = text[:3000]
+    lines = [l.strip() for l in excerpt.split('\n') if l.strip()]
+
+    year_m = re.search(r'\b(20[0-2][0-9]|2030|199[0-9])\b', excerpt)
     year = year_m.group(1) if year_m else ""
-    title = ""
-    for line in text[:600].split('\n'):
-        line = line.strip()
-        if 10 <= len(line) <= 150 and not line.startswith('http'):
-            title = line
+
+    author = ""
+    for line in lines[:30]:
+        if 5 <= len(line) <= 60 and _NAME_PATTERN.match(line):
+            author = line
             break
-    return {"title": title, "author": "", "year": year}
+
+    # Title: longest non-author line in first 200 words
+    title = ""
+    best_len = 0
+    words_seen = 0
+    for line in lines:
+        words_seen += len(line.split())
+        if words_seen > 200:
+            break
+        if 15 <= len(line) <= 150 and not line.startswith('http') and not _NAME_PATTERN.match(line):
+            if len(line) > best_len:
+                title = line
+                best_len = len(line)
+
+    if not title:
+        for line in lines[:15]:
+            if 10 <= len(line) <= 150 and not line.startswith('http') and not _NAME_PATTERN.match(line):
+                title = line
+                break
+
+    return {"title": title, "author": author, "year": year}
 
 
 def parse_terms(raw: str) -> list[dict]:
@@ -533,7 +581,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.0.1"
+MNEME_VERSION = "2.1.0"
 
 
 @app.get("/version")
@@ -652,6 +700,11 @@ async def ollama_status():
     return {"available": available, "model": model}
 
 
+@app.get("/process/status")
+def get_process_status():
+    return _processing_status
+
+
 @app.get("/wikilinks")
 def get_wikilinks():
     cfg = load_config()
@@ -677,6 +730,17 @@ async def resolve_models(requested: str, api_key: str, ollama_model: str) -> tup
 
 @app.post("/process")
 async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
+    global _processing_status
+    _processing_status = {"active": True, "stage": "PDF wird gelesen...", "progress": 0.05,
+                          "chunk_current": 0, "chunk_total": 0}
+    try:
+        return await _process_pdf_inner(file, model)
+    finally:
+        _processing_status["active"] = False
+        _processing_status["stage"] = ""
+
+
+async def _process_pdf_inner(file: UploadFile, model: str):
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
 
@@ -697,6 +761,9 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     full_text = "\n\n".join(pages_text).strip()
     if len(full_text) < 100:
         raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
+
+    _processing_status["stage"] = "Vault wird gescannt..."
+    _processing_status["progress"] = 0.10
 
     vault_links = extract_wikilinks(vault_path)
     base_links = load_psych_base_links()
@@ -723,6 +790,9 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
 
     # Phase 1a — Metadata
+    _processing_status["stage"] = "Metadaten werden extrahiert..."
+    _processing_status["progress"] = 0.15
+
     if meta_model == "claude":
         try:
             meta = parse_metadata(call_claude(api_key, build_metadata_prompt(full_text), max_tokens=256))
@@ -738,18 +808,26 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         if not await ollama_available(ollama_model):
             raise HTTPException(status_code=503, detail="ollama_unavailable")
         p1_chunks = chunk_text(full_text, CHUNK_MAX_WORDS_OLLAMA)
+        _processing_status["chunk_total"] = len(p1_chunks)
         term_lists = []
         for i, chunk in enumerate(p1_chunks):
+            _processing_status["stage"] = f"Chunk {i + 1}/{len(p1_chunks)} wird analysiert..."
+            _processing_status["progress"] = 0.20 + 0.60 * (i / len(p1_chunks))
+            _processing_status["chunk_current"] = i + 1
             raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(chunk))
             terms = parse_terms_simple(raw)
             logger.info("CHUNK %d/%d [Ollama]: %d Begriffe", i + 1, len(p1_chunks), len(terms))
             term_lists.append(terms)
     else:
         p1_chunks = chunk_text(full_text, CHUNK_MAX_WORDS)
+        _processing_status["chunk_total"] = len(p1_chunks)
         term_lists = []
         for i, chunk in enumerate(p1_chunks):
+            _processing_status["stage"] = f"Chunk {i + 1}/{len(p1_chunks)} wird analysiert..."
+            _processing_status["progress"] = 0.20 + 0.60 * (i / len(p1_chunks))
+            _processing_status["chunk_current"] = i + 1
             try:
-                raw = call_claude(api_key, build_recognition_prompt(chunk), max_tokens=1024)
+                raw = call_claude(api_key, build_recognition_prompt(chunk), max_tokens=2048)
                 terms = parse_terms(raw)
             except Exception as e:
                 logger.warning("Claude Phase1 Chunk %d fehlgeschlagen: %s", i + 1, e)
@@ -757,10 +835,16 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
             logger.info("CHUNK %d/%d [Claude]: %d Begriffe", i + 1, len(p1_chunks), len(terms))
             term_lists.append(terms)
 
+    _processing_status["stage"] = "Begriffe werden zusammengeführt..."
+    _processing_status["progress"] = 0.82
+
     all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links, full_text)
     logger.info("TERMS GESAMT: %d (davon %d aus Cache)", len(all_terms), len(cached_terms))
 
     # Phase 2 — Python-Ersetzung
+    _processing_status["stage"] = "Wikilinks werden gesetzt..."
+    _processing_status["progress"] = 0.88
+
     source_pdf = file.filename or "document.pdf"
     frontmatter = (
         f"---\n"
@@ -783,6 +867,9 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     save_token_cache(vault_path, all_terms)
     output_filename = derive_output_filename(meta, source_pdf)
     (Path(vault_path) / output_filename).write_text(result, encoding="utf-8")
+
+    _processing_status["stage"] = "Stubs werden erstellt..."
+    _processing_status["progress"] = 0.94
 
     found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', result))
     stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename)

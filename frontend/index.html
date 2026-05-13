@@ -420,6 +420,18 @@
     .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tree-file:hover { color: var(--accent); }
 
+    /* Progress stage text */
+    #progress-stage {
+      display: none;
+      font-size: 13px;
+      color: var(--text2);
+      margin-bottom: 6px;
+      min-height: 18px;
+      animation: fadeIn 0.3s ease;
+    }
+    #progress-stage.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
     /* Token management */
     .token-stats { font-size: 13px; color: var(--text2); margin-bottom: 20px; }
     .dup-pair {
@@ -531,8 +543,9 @@
       </div>
     </div>
 
+    <div id="progress-stage"></div>
     <div class="progress-bar-wrap" id="progress-wrap">
-      <div class="progress-bar indeterminate" id="progress-bar"></div>
+      <div class="progress-bar" id="progress-bar"></div>
     </div>
 
     <div id="status-box"></div>
@@ -643,6 +656,7 @@
   let selectedFile = null;
   let selectedModel = 'auto';
   let processing = false;
+  let pollTimer = null;
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -825,14 +839,46 @@
     }
   });
 
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`${API}/process/status`);
+        const s = await r.json();
+        if (s.active && s.stage) {
+          const stageEl = document.getElementById('progress-stage');
+          stageEl.textContent = s.stage;
+          if (s.progress >= 0.19) {
+            progressBar.classList.remove('indeterminate');
+            progressBar.style.width = `${Math.round(s.progress * 100)}%`;
+          }
+        }
+      } catch {}
+    }, 1500);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
   function showProgress() {
+    const stageEl = document.getElementById('progress-stage');
+    stageEl.textContent = 'PDF wird gelesen...';
+    stageEl.classList.add('active');
     progressWrap.classList.add('active');
     progressBar.className = 'progress-bar indeterminate';
+    progressBar.style.width = '';
+    startPolling();
   }
 
   function hideProgress() {
+    stopPolling();
     progressWrap.classList.remove('active');
     progressBar.className = 'progress-bar';
+    progressBar.style.width = '0%';
+    const stageEl = document.getElementById('progress-stage');
+    stageEl.classList.remove('active');
+    stageEl.textContent = '';
   }
 
   function setStatus(type, html) {
