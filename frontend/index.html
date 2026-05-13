@@ -420,6 +420,26 @@
     .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tree-file:hover { color: var(--accent); }
 
+    /* Type badges */
+    .tbadge.person { background: rgba(52,199,89,0.12); color: #1a7a35; }
+    .tbadge.concept { background: rgba(0,113,227,0.08); color: var(--accent); }
+    .tbadge.method { background: rgba(255,159,10,0.12); color: #7a4a00; }
+    .tbadge.noise { background: rgba(255,59,48,0.07); color: var(--danger); }
+
+    /* Bulk page */
+    .pdf-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .pdf-row:last-child { border-bottom: none; }
+    .pdf-check { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
+    .pdf-name { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bulk-source { font-size: 11px; color: var(--text2); white-space: nowrap; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+
     /* Review page */
     .section-header {
       display: flex;
@@ -546,6 +566,12 @@
       <div class="status-dot" id="ollama-dot"></div>
       <span id="ollama-label">Ollama</span>
     </div>
+    <button class="btn-icon" id="btn-bulk" title="Bulk-Verarbeitung">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+      </svg>
+    </button>
     <button class="btn-icon" id="btn-settings" title="Einstellungen">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
@@ -688,6 +714,33 @@
 
   </div>
 
+  <!-- Bulk page -->
+  <div class="page" id="page-bulk">
+
+    <div class="card">
+      <div class="card-title">Bulk: RAW-Data verarbeiten</div>
+      <div id="bulk-folder-info" style="font-size:13px;color:var(--text2);margin-bottom:16px">
+        Lädt PDFs aus <code>{vault}/RAW-Data/</code>
+      </div>
+      <button class="btn-secondary" id="btn-load-raw-pdfs">RAW-Data laden</button>
+    </div>
+
+    <div class="card" id="bulk-pdf-card" style="display:none">
+      <div class="section-header">
+        <div class="section-label">PDFs <span id="bulk-pdf-count" style="font-weight:400"></span></div>
+        <button class="btn-secondary" id="btn-toggle-bulk-pdfs" style="font-size:12px;padding:5px 12px">Alle ✓</button>
+      </div>
+      <div class="token-list" id="bulk-pdf-list"></div>
+    </div>
+
+    <div id="bulk-empty-hint" style="display:none;font-size:13px;color:var(--text2);text-align:center;padding:16px 0">
+      Kein <code>RAW-Data</code>-Ordner im Vault gefunden.
+    </div>
+
+    <button class="btn-primary" id="btn-start-bulk" disabled>Alle verarbeiten</button>
+
+  </div>
+
   <!-- Review page -->
   <div class="page" id="page-review">
 
@@ -752,12 +805,16 @@
   let reviewMergedTerms = [];
   let reviewIgnoredDups = new Set();
   let reviewAllSelected = true;
+  let reviewIsBulk = false;
+  let bulkAllPdfsSelected = true;
 
   // Elements
   const pageHome = document.getElementById('page-home');
   const pageSettings = document.getElementById('page-settings');
   const pageTokens = document.getElementById('page-tokens');
   const pageReview = document.getElementById('page-review');
+  const pageBulk = document.getElementById('page-bulk');
+  const btnBulk = document.getElementById('btn-bulk');
   const btnSettings = document.getElementById('btn-settings');
   const btnHome = document.getElementById('btn-home');
   const btnTokens = document.getElementById('btn-tokens');
@@ -777,21 +834,26 @@
   btnSettings.addEventListener('click', () => showPage('settings'));
   btnHome.addEventListener('click', () => showPage('home'));
   btnTokens.addEventListener('click', () => showPage('tokens'));
+  btnBulk.addEventListener('click', () => showPage('bulk'));
   document.getElementById('banner-settings-link').addEventListener('click', () => showPage('settings'));
 
   function showPage(page) {
-    if (page !== 'review' && currentDraft !== null) {
+    if (page !== 'review' && (currentDraft !== null || reviewIsBulk)) {
       if (!confirm('Review-Entwurf verwerfen und zur anderen Seite wechseln?')) return;
       currentDraft = null;
       reviewMergedTerms = [];
+      reviewIsBulk = false;
     }
     pageHome.classList.toggle('active', page === 'home');
     pageSettings.classList.toggle('active', page === 'settings');
     pageTokens.classList.toggle('active', page === 'tokens');
     pageReview.classList.toggle('active', page === 'review');
-    btnSettings.style.display = (page === 'settings' || page === 'review') ? 'none' : 'flex';
+    pageBulk.classList.toggle('active', page === 'bulk');
+    const onReview = page === 'review';
+    btnSettings.style.display = (page === 'settings' || onReview) ? 'none' : 'flex';
     btnHome.style.display = page === 'home' ? 'none' : 'flex';
-    btnTokens.style.display = (page === 'tokens' || page === 'review') ? 'none' : 'flex';
+    btnTokens.style.display = (page === 'tokens' || onReview) ? 'none' : 'flex';
+    btnBulk.style.display = (page === 'bulk' || onReview) ? 'none' : 'flex';
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
     if (page === 'review') renderReview();
@@ -1202,11 +1264,101 @@
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
+  // Bulk page
+  let rawPdfList = [];
+
+  document.getElementById('btn-load-raw-pdfs').addEventListener('click', async () => {
+    try {
+      const r = await fetch(`${API}/vault/raw_pdfs`);
+      const data = await r.json();
+      document.getElementById('bulk-folder-info').textContent = `Ordner: ${data.folder || '(nicht konfiguriert)'}`;
+      if (!data.pdfs || !data.pdfs.length) {
+        document.getElementById('bulk-empty-hint').style.display = 'block';
+        document.getElementById('bulk-pdf-card').style.display = 'none';
+        document.getElementById('btn-start-bulk').disabled = true;
+        return;
+      }
+      document.getElementById('bulk-empty-hint').style.display = 'none';
+      rawPdfList = data.pdfs.map(p => ({ path: p, selected: true }));
+      renderBulkPdfList();
+      document.getElementById('bulk-pdf-card').style.display = 'block';
+      document.getElementById('btn-start-bulk').disabled = false;
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
+
+  function renderBulkPdfList() {
+    document.getElementById('bulk-pdf-count').textContent = `(${rawPdfList.length})`;
+    document.getElementById('bulk-pdf-list').innerHTML = rawPdfList.map((p, idx) => {
+      const name = p.path.split('/').pop();
+      return `<div class="pdf-row">
+        <input type="checkbox" class="pdf-check" data-idx="${idx}" ${p.selected ? 'checked' : ''}>
+        <span class="pdf-name" title="${p.path}">${name}</span>
+      </div>`;
+    }).join('');
+    document.getElementById('bulk-pdf-list').querySelectorAll('.pdf-check').forEach(cb => {
+      cb.addEventListener('change', () => { rawPdfList[+cb.dataset.idx].selected = cb.checked; });
+    });
+  }
+
+  document.getElementById('btn-toggle-bulk-pdfs').addEventListener('click', () => {
+    bulkAllPdfsSelected = !bulkAllPdfsSelected;
+    rawPdfList.forEach(p => p.selected = bulkAllPdfsSelected);
+    document.getElementById('btn-toggle-bulk-pdfs').textContent = bulkAllPdfsSelected ? 'Alle ✓' : 'Alle ☐';
+    renderBulkPdfList();
+  });
+
+  document.getElementById('btn-start-bulk').addEventListener('click', async () => {
+    const selected = rawPdfList.filter(p => p.selected).map(p => p.path);
+    if (!selected.length) { showToast('Keine PDFs ausgewählt'); return; }
+    const btn = document.getElementById('btn-start-bulk');
+    btn.disabled = true;
+    btn.textContent = `Verarbeite 0/${selected.length}…`;
+    showProgress();
+
+    try {
+      const r = await fetch(`${API}/process/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdf_paths: selected, model: selectedModel }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); return; }
+
+      if (data.status === 'bulk_review_ready') {
+        currentDraft = {
+          filename: `${selected.length} PDFs`,
+          content: '',
+          tokens: data.token_list,
+          duplicate_suggestions: [],
+          stats: data.stats,
+          cost: { input_tokens: 0, output_tokens: 0, phase1_model: 'auto' },
+        };
+        reviewMergedTerms = [];
+        reviewIgnoredDups = new Set();
+        reviewAllSelected = true;
+        reviewIsBulk = true;
+        pageBulk.classList.remove('active');
+        pageReview.classList.add('active');
+        btnHome.style.display = 'flex';
+        btnBulk.style.display = 'none';
+        btnSettings.style.display = 'none';
+        btnTokens.style.display = 'none';
+        renderReview();
+      }
+    } catch { showToast('Backend nicht erreichbar'); }
+    finally {
+      btn.disabled = false;
+      btn.textContent = 'Alle verarbeiten';
+      hideProgress();
+    }
+  });
+
   // Review page
   const FILTER_LABELS = {
     impressum: 'Impressum', figure_ref: 'Abbildung', technical: 'URL/Tech',
-    too_short: 'zu kurz', number_or_year: 'Zahl', unknown: 'gefiltert',
+    too_short: 'zu kurz', number_or_year: 'Zahl', claude_noise: 'Noise', unknown: 'gefiltert',
   };
+  const TYPE_LABELS = { person: 'Person', concept: 'Konzept', method: 'Methode' };
 
   function renderReview() {
     if (!currentDraft) return;
@@ -1241,14 +1393,17 @@
 
     const list = document.getElementById('review-token-list');
     list.innerHTML = [...selected, ...unselected].map(t => {
-      const cacheBadge = !t.is_new
-        ? '<span class="tbadge cache">cache</span>' : '';
+      const cacheBadge = !t.is_new ? '<span class="tbadge cache">cache</span>' : '';
+      const typeBadge = t.type && TYPE_LABELS[t.type]
+        ? `<span class="tbadge ${t.type}">${TYPE_LABELS[t.type]}</span>` : '';
       const filterBadge = t.filtered_reason
-        ? `<span class="tbadge filtered">${FILTER_LABELS[t.filtered_reason] || t.filtered_reason}</span>` : '';
+        ? `<span class="tbadge noise">${FILTER_LABELS[t.filtered_reason] || t.filtered_reason}</span>` : '';
+      const srcBadge = t.source
+        ? `<span class="bulk-source" title="${t.source}">${t.source}</span>` : '';
       return `<div class="token-row">
         <input type="checkbox" class="token-check" data-canonical="${esc(t.canonical)}" ${t.selected ? 'checked' : ''}>
         <span class="token-label${t.filtered_reason ? ' dim' : ''}">${t.canonical}</span>
-        ${cacheBadge}${filterBadge}
+        ${typeBadge}${cacheBadge}${filterBadge}${srcBadge}
       </div>`;
     }).join('');
 
@@ -1310,28 +1465,40 @@
     const btn = document.getElementById('btn-confirm-review');
     btn.disabled = true;
     btn.textContent = 'Speichert…';
+    const endpoint = reviewIsBulk ? `${API}/process/bulk_confirm` : `${API}/process/confirm`;
     try {
-      const r = await fetch(`${API}/process/confirm`, {
+      const r = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ selected_terms: selectedTerms, merged_terms: reviewMergedTerms }),
       });
       const data = await r.json();
       if (r.ok) {
-        const draft = currentDraft;
         currentDraft = null;
         reviewMergedTerms = [];
+        reviewIsBulk = false;
         pageReview.classList.remove('active');
         pageHome.classList.add('active');
         btnHome.style.display = 'none';
         btnSettings.style.display = 'flex';
         btnTokens.style.display = 'flex';
-        const stubStr = data.stubs_created > 0 ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt` : '';
-        setStatus('success',
-          `Notiz erstellt: <strong>${data.filename}</strong><br>` +
-          `Modell: ${data.model_used} · ${data.wikilinks_total} Wikilinks gesetzt${stubStr}`
-        );
-        showToast('Notiz gespeichert ✓');
+        btnBulk.style.display = 'flex';
+        if (data.confirmed) {
+          // bulk result
+          setStatus('success',
+            `${data.total} Notizen gespeichert` +
+            (data.errors.length ? `<br>${data.errors.length} Fehler` : '')
+          );
+          showToast(`${data.total} Notizen gespeichert ✓`);
+        } else {
+          // single result
+          const stubStr = data.stubs_created > 0 ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt` : '';
+          setStatus('success',
+            `Notiz erstellt: <strong>${data.filename}</strong><br>` +
+            `Modell: ${data.model_used} · ${data.wikilinks_total} Wikilinks gesetzt${stubStr}`
+          );
+          showToast('Notiz gespeichert ✓');
+        }
         loadVaultTree();
       } else {
         showToast(`Fehler: ${data.detail || r.statusText}`);
@@ -1349,12 +1516,15 @@
     if (!confirm('Entwurf verwerfen? Nichts wird gespeichert.')) return;
     currentDraft = null;
     reviewMergedTerms = [];
+    const wasBulk = reviewIsBulk;
+    reviewIsBulk = false;
     pageReview.classList.remove('active');
-    pageHome.classList.add('active');
-    btnHome.style.display = 'none';
+    (wasBulk ? pageBulk : pageHome).classList.add('active');
+    btnHome.style.display = wasBulk ? 'flex' : 'none';
     btnSettings.style.display = 'flex';
     btnTokens.style.display = 'flex';
-    resetDrop();
+    btnBulk.style.display = wasBulk ? 'none' : 'flex';
+    if (!wasBulk) resetDrop();
   });
 
   document.getElementById('btn-quality-pass').addEventListener('click', async () => {
