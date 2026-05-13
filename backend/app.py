@@ -533,7 +533,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.0.0"
+MNEME_VERSION = "2.0.1"
 
 
 @app.get("/version")
@@ -709,6 +709,10 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         raise HTTPException(status_code=400, detail="claude_api_key_missing")
 
     phase1_model, meta_model = await resolve_models(requested, api_key, ollama_model)
+
+    if phase1_model == "claude" and not api_key.strip():
+        raise HTTPException(status_code=400, detail="claude_api_key_missing")
+
     _last_run_stats.update({"input_tokens": 0, "output_tokens": 0, "calls": 0,
                             "phase1_model": phase1_model, "meta_model": meta_model})
     logger.info("PHASE1: %s | META: %s | FILE: %s", phase1_model, meta_model, file.filename)
@@ -720,7 +724,11 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
 
     # Phase 1a — Metadata
     if meta_model == "claude":
-        meta = parse_metadata(call_claude(api_key, build_metadata_prompt(full_text), max_tokens=256))
+        try:
+            meta = parse_metadata(call_claude(api_key, build_metadata_prompt(full_text), max_tokens=256))
+        except Exception as e:
+            logger.warning("Metadata-Call fehlgeschlagen (%s), fallback auf Regex", e)
+            meta = extract_metadata_regex(full_text)
     else:
         meta = extract_metadata_regex(full_text)
     logger.info("METADATA: %s (via %s)", meta, meta_model)
@@ -785,7 +793,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
         "filename": output_filename,
         "model_used": f"{phase1_model}/{meta_model}",
         "wikilinks_total": total_links,
-        "chunks": len(chunks),
+        "chunks": len(p1_chunks),
         "stubs_created": stubs_created,
         "stubs_existing": stubs_existing,
     }

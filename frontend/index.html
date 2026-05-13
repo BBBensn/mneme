@@ -783,7 +783,10 @@
           claude_api_key_missing: 'Claude API Key fehlt. Bitte in den Einstellungen eintragen.',
           scanned_or_empty: 'PDF scheint gescannt oder leer zu sein — kein extrahierbarer Text.',
         };
-        const msg = msgs[data.detail] || `Fehler: ${data.detail || r.statusText}`;
+        const rawDetail = Array.isArray(data.detail)
+          ? data.detail.map(e => e.msg || e.message || e.detail || JSON.stringify(e)).join(' · ')
+          : (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || r.statusText));
+        const msg = msgs[rawDetail] || `Fehler: ${rawDetail}`;
         setStatus('error', msg);
         return;
       }
