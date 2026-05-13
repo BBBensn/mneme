@@ -45,12 +45,14 @@ DEFAULT_CONFIG = {
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
+CHUNK_MAX_WORDS_OLLAMA = 800
 TOKENS_FILENAME = "tokens.json"
 HAIKU_PRICE_INPUT_PER_TOKEN = 0.0000008    # USD/token  ($0.80/MTok)
 HAIKU_PRICE_OUTPUT_PER_TOKEN = 0.000004    # USD/token  ($4.00/MTok)
 EUR_RATE = 0.92
 
-_last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+_last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0,
+                         "phase1_model": "", "meta_model": ""}
 
 
 def load_config() -> dict:
@@ -68,9 +70,9 @@ def save_config(cfg: dict):
         json.dump(cfg, f, indent=2)
 
 
-def chunk_text(text: str) -> list[str]:
+def chunk_text(text: str, max_words: int = CHUNK_MAX_WORDS) -> list[str]:
     words = text.split()
-    return [" ".join(words[i : i + CHUNK_MAX_WORDS]) for i in range(0, len(words), CHUNK_MAX_WORDS)]
+    return [" ".join(words[i : i + max_words]) for i in range(0, len(words), max_words)]
 
 
 PSYCH_BASE_PATH = Path(__file__).parent / "psych_base_links.json"
@@ -155,19 +157,56 @@ def build_metadata_prompt(text: str) -> str:
 def build_recognition_prompt(chunk: str) -> str:
     return (
         "Analysiere den folgenden wissenschaftlichen Text.\n"
-        "Identifiziere alle relevanten Fachbegriffe, Personen, Konzepte, Theorien und Methoden.\n"
+        "Identifiziere ALLE verlinkungswürdigen Begriffe. Im Zweifel: taggen. Lieber zu viele als zu wenige.\n"
+        "Erfasse ausdrücklich:\n"
+        "- Alle Eigennamen (auch Nachname allein wenn eindeutig: 'Warburg', 'Imdahl')\n"
+        "- Alle Fachbegriffe auch scheinbar allgemeine: 'Wahrnehmung', 'Reflexion', 'Emotion' sind Fachbegriffe!\n"
+        "- Institutionen, Zeitschriften, Werktitel\n"
+        "- Komposita wenn sie als Konzept fungieren\n"
         "Gib eine JSON-Liste zurück. Format:\n"
         '[{"canonical": "Kanonische Form", "aliases": ["Variante1", "Variante2"]}, ...]\n'
-        "Regeln:\n"
-        "- Nur Begriffe die wirklich im Text vorkommen\n"
         "- canonical = Nominativ Singular (Grundform)\n"
-        "- aliases = ALLE im Text vorkommenden Flexionen: Genitiv (-s/-es), Plural (-e/-en/-er/-ø), Akkusativ, Dativ\n"
-        "  Beispiel: canonical 'Denkraum' → aliases ['Denkraum', 'Denkraums', 'Denkraumes', 'Denkräume', 'Denkräumen']\n"
-        "- Auch fremdsprachige Varianten und Synonyme in aliases aufnehmen\n"
+        "- aliases = ALLE Flexionen im Text (Genitiv, Plural, Kasus) + Synonyme + fremdsprachige Varianten\n"
+        "  Beispiel: canonical 'Denkraum' → aliases ['Denkraum', 'Denkraums', 'Denkräume', 'Denkräumen']\n"
         "- Füge canonical immer auch in aliases ein\n"
         "- Antworte NUR mit dem JSON-Array, ohne Erklärungen\n\n"
         f"Text:\n{chunk}"
     )
+
+
+def build_recognition_prompt_ollama(chunk: str) -> str:
+    return (
+        "Liste alle relevanten Begriffe in diesem wissenschaftlichen Text.\n"
+        "Erfasse: Personen (auch nur Nachnamen), Konzepte, Fachbegriffe, Theorien, Institutionen.\n"
+        "Im Zweifel: aufnehmen.\n"
+        "Antworte NUR mit den Begriffen, kommagetrennt oder einer pro Zeile, kein anderer Text.\n\n"
+        f"Text:\n{chunk}"
+    )
+
+
+def parse_terms_simple(raw: str) -> list[dict]:
+    """Parse plain-text term list (Ollama output: comma or newline separated)."""
+    result = []
+    seen: set[str] = set()
+    for part in re.split(r'[,\n]', raw):
+        term = re.sub(r'^[\s\-•–*#\d.]+', '', part).strip()
+        if len(term) >= 2 and term not in seen:
+            seen.add(term)
+            result.append({"canonical": term, "aliases": [term]})
+    return result
+
+
+def extract_metadata_regex(text: str) -> dict:
+    """Fallback metadata extraction without API."""
+    year_m = re.search(r'\b(19[0-9]{2}|20[0-2][0-9])\b', text[:3000])
+    year = year_m.group(1) if year_m else ""
+    title = ""
+    for line in text[:600].split('\n'):
+        line = line.strip()
+        if 10 <= len(line) <= 150 and not line.startswith('http'):
+            title = line
+            break
+    return {"title": title, "author": "", "year": year}
 
 
 def parse_terms(raw: str) -> list[dict]:
@@ -417,6 +456,36 @@ def find_duplicate_pairs(cache: dict) -> list[dict]:
     return pairs
 
 
+def rename_wikilinks_in_vault(vault_path: str, old_name: str, new_name: str) -> int:
+    pattern = re.compile(r'\[\[' + re.escape(old_name) + r'(?:\|([^\]]+))?\]\]')
+    updated = 0
+    for md_file in Path(vault_path).rglob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            def repl(m: re.Match) -> str:
+                display = m.group(1)
+                return f"[[{new_name}|{display}]]" if display else f"[[{new_name}|{old_name}]]"
+            new_content = pattern.sub(repl, content)
+            if new_content != content:
+                md_file.write_text(new_content, encoding="utf-8")
+                updated += 1
+        except Exception:
+            pass
+    return updated
+
+
+def count_backlinks(vault_path: str, term: str) -> int:
+    pat = re.compile(r'\[\[' + re.escape(term))
+    count = 0
+    for md_file in Path(vault_path).rglob("*.md"):
+        try:
+            if pat.search(md_file.read_text(encoding="utf-8")):
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
 # --- Endpoints ---
 
 @app.get("/")
@@ -464,7 +533,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "1.9.0"
+MNEME_VERSION = "2.0.0"
 
 
 @app.get("/version")
@@ -484,6 +553,8 @@ def last_run_cost():
         "cost_usd": round(cost_usd, 5),
         "cost_eur": round(cost_eur, 5),
         "calls": _last_run_stats["calls"],
+        "phase1_model": _last_run_stats.get("phase1_model", ""),
+        "meta_model": _last_run_stats.get("meta_model", ""),
     }
 
 
@@ -515,6 +586,9 @@ def merge_token_terms(req: MergeRequest):
     data[req.keep] = sorted(keep_al | remove_al | {req.remove})
     del data[req.remove]
     tok_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Replace all [[req.remove]] links throughout the vault
+    files_updated = rename_wikilinks_in_vault(vault_path, req.remove, req.keep)
+    # Delete stub for removed term
     stub_deleted = False
     for folder in ("Personen", "Methoden", "Konzepte"):
         p = Path(vault_path) / folder / f"{req.remove}.md"
@@ -522,7 +596,8 @@ def merge_token_terms(req: MergeRequest):
             p.unlink()
             stub_deleted = True
             break
-    return {"ok": True, "stub_deleted": stub_deleted}
+    backlinks = count_backlinks(vault_path, req.keep)
+    return {"ok": True, "stub_deleted": stub_deleted, "files_updated": files_updated, "backlinks": backlinks}
 
 
 @app.post("/stubs/cleanup")
@@ -588,6 +663,19 @@ def get_wikilinks():
 
 
 @app.post("/process")
+async def resolve_models(requested: str, api_key: str, ollama_model: str) -> tuple[str, str]:
+    """Returns (phase1_model, meta_model)."""
+    if requested == "claude":
+        return "claude", "claude"
+    if requested == "ollama":
+        return "ollama", "regex"
+    # auto
+    ollama_ok = await ollama_available(ollama_model)
+    phase1 = "ollama" if ollama_ok else "claude"
+    meta = "claude" if api_key.strip() else "regex"
+    return phase1, meta
+
+
 async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
@@ -610,7 +698,6 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     if len(full_text) < 100:
         raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
 
-    chunks = chunk_text(full_text)
     vault_links = extract_wikilinks(vault_path)
     base_links = load_psych_base_links()
 
@@ -618,54 +705,54 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     ollama_model = cfg.get("ollama_model", "llama3.1:8b")
     api_key = get_anthropic_key(cfg)
 
-    if requested == "auto":
-        use_model = "claude" if api_key.strip() else "ollama"
-    elif requested == "claude":
-        if not api_key.strip():
-            raise HTTPException(status_code=400, detail="claude_api_key_missing")
-        use_model = "claude"
-    else:
-        use_model = "ollama"
+    if requested == "claude" and not api_key.strip():
+        raise HTTPException(status_code=400, detail="claude_api_key_missing")
 
-    _last_run_stats.update({"input_tokens": 0, "output_tokens": 0, "calls": 0})
-    logger.info("MODEL: %s | FILE: %s | CHUNKS: %d", use_model, file.filename, len(chunks))
+    phase1_model, meta_model = await resolve_models(requested, api_key, ollama_model)
+    _last_run_stats.update({"input_tokens": 0, "output_tokens": 0, "calls": 0,
+                            "phase1_model": phase1_model, "meta_model": meta_model})
+    logger.info("PHASE1: %s | META: %s | FILE: %s", phase1_model, meta_model, file.filename)
 
-    async def run_call(p: str, max_tokens: int = 1024) -> str:
-        if use_model == "claude":
-            try:
-                return call_claude(api_key, p, max_tokens=max_tokens)
-            except Exception as e:
-                logger.warning("Claude fehlgeschlagen (%s), Fallback auf Ollama", e)
-                if not await ollama_available(ollama_model):
-                    raise HTTPException(status_code=503, detail="claude_error_and_ollama_unavailable")
-                return await call_ollama(ollama_model, p)
-        else:
-            if not await ollama_available(ollama_model):
-                raise HTTPException(status_code=503, detail="ollama_unavailable")
-            return await call_ollama(ollama_model, p)
-
-    # Phase 0: Token-Cache laden (bekannte Begriffe aus früheren Runs)
+    # Phase 0: Token-Cache
     token_cache = load_token_cache(vault_path)
     cached_terms = [{"canonical": c, "aliases": aliases} for c, aliases in token_cache.items()]
     logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
 
     # Phase 1a — Metadata
-    meta_raw = await run_call(build_metadata_prompt(full_text), max_tokens=256)
-    meta = parse_metadata(meta_raw)
-    logger.info("METADATA: %s", meta)
+    if meta_model == "claude":
+        meta = parse_metadata(call_claude(api_key, build_metadata_prompt(full_text), max_tokens=256))
+    else:
+        meta = extract_metadata_regex(full_text)
+    logger.info("METADATA: %s (via %s)", meta, meta_model)
 
-    # Phase 1b — KI erkennt neue Begriffe pro Chunk
-    term_lists = []
-    for i, chunk in enumerate(chunks):
-        raw = await run_call(build_recognition_prompt(chunk), max_tokens=1024)
-        terms = parse_terms(raw)
-        logger.info("CHUNK %d/%d: %d Begriffe erkannt", i + 1, len(chunks), len(terms))
-        term_lists.append(terms)
+    # Phase 1b — Term recognition (Ollama: kleine Chunks + Plain-Text; Claude: JSON)
+    if phase1_model == "ollama":
+        if not await ollama_available(ollama_model):
+            raise HTTPException(status_code=503, detail="ollama_unavailable")
+        p1_chunks = chunk_text(full_text, CHUNK_MAX_WORDS_OLLAMA)
+        term_lists = []
+        for i, chunk in enumerate(p1_chunks):
+            raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(chunk))
+            terms = parse_terms_simple(raw)
+            logger.info("CHUNK %d/%d [Ollama]: %d Begriffe", i + 1, len(p1_chunks), len(terms))
+            term_lists.append(terms)
+    else:
+        p1_chunks = chunk_text(full_text, CHUNK_MAX_WORDS)
+        term_lists = []
+        for i, chunk in enumerate(p1_chunks):
+            try:
+                raw = call_claude(api_key, build_recognition_prompt(chunk), max_tokens=1024)
+                terms = parse_terms(raw)
+            except Exception as e:
+                logger.warning("Claude Phase1 Chunk %d fehlgeschlagen: %s", i + 1, e)
+                terms = []
+            logger.info("CHUNK %d/%d [Claude]: %d Begriffe", i + 1, len(p1_chunks), len(terms))
+            term_lists.append(terms)
 
     all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links, full_text)
     logger.info("TERMS GESAMT: %d (davon %d aus Cache)", len(all_terms), len(cached_terms))
 
-    # Phase 2 — Python ersetzt Begriffe im Originaltext (0 weitere API-Calls)
+    # Phase 2 — Python-Ersetzung
     source_pdf = file.filename or "document.pdf"
     frontmatter = (
         f"---\n"
@@ -687,10 +774,8 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
 
     save_token_cache(vault_path, all_terms)
     output_filename = derive_output_filename(meta, source_pdf)
-    output_path = Path(vault_path) / output_filename
-    output_path.write_text(result, encoding="utf-8")
+    (Path(vault_path) / output_filename).write_text(result, encoding="utf-8")
 
-    # Stubs für neue Wikilinks anlegen
     found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', result))
     stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename)
     logger.info("STUBS: %d erstellt, %d existieren", stubs_created, stubs_existing)
@@ -698,7 +783,7 @@ async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     return {
         "ok": True,
         "filename": output_filename,
-        "model_used": use_model,
+        "model_used": f"{phase1_model}/{meta_model}",
         "wikilinks_total": total_links,
         "chunks": len(chunks),
         "stubs_created": stubs_created,

@@ -792,7 +792,10 @@
       try {
         const costR = await fetch(`${API}/last_run_cost`);
         const cost = await costR.json();
-        if (cost.input_tokens > 0) {
+        if (cost.phase1_model === 'ollama') {
+          const claudeEur = (cost.cost_eur * 100).toFixed(3);
+          costStr = `<br>Kosten: ~0.00¢ (Ollama)${cost.input_tokens > 0 ? ` + ~${claudeEur}¢ (Claude Meta)` : ''}`;
+        } else if (cost.input_tokens > 0) {
           const eur = (cost.cost_eur * 100).toFixed(2);
           const inK = (cost.input_tokens / 1000).toFixed(1);
           const outK = (cost.output_tokens / 1000).toFixed(1);
@@ -1033,7 +1036,11 @@
       });
       const data = await r.json();
       if (r.ok) {
-        showToast(`Zusammengeführt: "${remove}" → "${keep}"${data.stub_deleted ? ' · Stub gelöscht' : ''}`);
+        const parts = [`"${remove}" → "${keep}"`];
+        if (data.stub_deleted) parts.push('Stub gelöscht');
+        if (data.files_updated > 0) parts.push(`${data.files_updated} Files aktualisiert`);
+        if (data.backlinks != null) parts.push(`${data.backlinks} Backlinks`);
+        showToast('Zusammengeführt: ' + parts.join(' · '));
         loadTokenPage();
       } else {
         showToast('Fehler beim Zusammenführen');
