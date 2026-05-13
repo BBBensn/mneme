@@ -662,7 +662,6 @@ def get_wikilinks():
     return {"links": links, "count": len(links)}
 
 
-@app.post("/process")
 async def resolve_models(requested: str, api_key: str, ollama_model: str) -> tuple[str, str]:
     """Returns (phase1_model, meta_model)."""
     if requested == "claude":
@@ -676,6 +675,7 @@ async def resolve_models(requested: str, api_key: str, ollama_model: str) -> tup
     return phase1, meta
 
 
+@app.post("/process")
 async def process_pdf(file: UploadFile = File(...), model: str = "auto"):
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
