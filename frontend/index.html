@@ -420,6 +420,67 @@
     .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tree-file:hover { color: var(--accent); }
 
+    /* Review page */
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .section-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text2);
+    }
+    .token-list {
+      max-height: 320px;
+      overflow-y: auto;
+      margin-top: 4px;
+    }
+    .token-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .token-row:last-child { border-bottom: none; }
+    .token-check { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
+    .token-label { flex: 1; color: var(--text); }
+    .token-label.dim { color: var(--text2); }
+    .tbadge {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: var(--surface2);
+      color: var(--text2);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .tbadge.cache { background: rgba(0,113,227,0.08); color: var(--accent); }
+    .tbadge.filtered { background: rgba(255,59,48,0.07); color: var(--danger); }
+    .review-actions {
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+    .btn-danger {
+      padding: 10px 16px;
+      background: none;
+      border: 1.5px solid var(--danger);
+      border-radius: var(--radius-sm);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--danger);
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .btn-danger:hover { background: rgba(255,59,48,0.07); }
+
     /* Progress stage text */
     #progress-stage {
       display: none;
@@ -627,6 +688,36 @@
 
   </div>
 
+  <!-- Review page -->
+  <div class="page" id="page-review">
+
+    <div class="card">
+      <div style="margin-bottom:16px">
+        <div class="card-title" id="review-filename" style="margin-bottom:4px;word-break:break-all">Review</div>
+        <div id="review-stats" style="font-size:13px;color:var(--text2)"></div>
+      </div>
+      <div class="section-header">
+        <div class="section-label">Neue Begriffe <span id="review-new-count" style="font-weight:400"></span></div>
+        <button class="btn-secondary" id="btn-toggle-all" style="font-size:12px;padding:5px 12px">Alle ✓</button>
+      </div>
+      <div class="token-list" id="review-token-list"></div>
+    </div>
+
+    <div class="card" id="review-dup-card" style="display:none">
+      <div class="card-title">Mögliche Duplikate <span id="review-dup-count" style="color:var(--text2);font-weight:400"></span></div>
+      <div id="review-dup-list"></div>
+    </div>
+
+    <div id="review-cost-info" style="font-size:12px;color:var(--text2);text-align:right;padding:0 4px"></div>
+
+    <div class="review-actions">
+      <button class="btn-secondary" id="btn-quality-pass" style="white-space:nowrap">Nochmal mit Claude</button>
+      <button class="btn-danger" id="btn-cancel-review">✕ Verwerfen</button>
+      <button class="btn-primary" id="btn-confirm-review" style="flex:1">Speichern</button>
+    </div>
+
+  </div>
+
   <!-- Tokens page -->
   <div class="page" id="page-tokens">
 
@@ -657,11 +748,16 @@
   let selectedModel = 'auto';
   let processing = false;
   let pollTimer = null;
+  let currentDraft = null;
+  let reviewMergedTerms = [];
+  let reviewIgnoredDups = new Set();
+  let reviewAllSelected = true;
 
   // Elements
   const pageHome = document.getElementById('page-home');
   const pageSettings = document.getElementById('page-settings');
   const pageTokens = document.getElementById('page-tokens');
+  const pageReview = document.getElementById('page-review');
   const btnSettings = document.getElementById('btn-settings');
   const btnHome = document.getElementById('btn-home');
   const btnTokens = document.getElementById('btn-tokens');
@@ -684,14 +780,21 @@
   document.getElementById('banner-settings-link').addEventListener('click', () => showPage('settings'));
 
   function showPage(page) {
+    if (page !== 'review' && currentDraft !== null) {
+      if (!confirm('Review-Entwurf verwerfen und zur anderen Seite wechseln?')) return;
+      currentDraft = null;
+      reviewMergedTerms = [];
+    }
     pageHome.classList.toggle('active', page === 'home');
     pageSettings.classList.toggle('active', page === 'settings');
     pageTokens.classList.toggle('active', page === 'tokens');
-    btnSettings.style.display = page === 'settings' ? 'none' : 'flex';
+    pageReview.classList.toggle('active', page === 'review');
+    btnSettings.style.display = (page === 'settings' || page === 'review') ? 'none' : 'flex';
     btnHome.style.display = page === 'home' ? 'none' : 'flex';
-    btnTokens.style.display = page === 'tokens' ? 'none' : 'flex';
+    btnTokens.style.display = (page === 'tokens' || page === 'review') ? 'none' : 'flex';
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
+    if (page === 'review') renderReview();
   }
 
   // Ollama status
@@ -805,31 +908,20 @@
         return;
       }
 
-      let costStr = '';
-      try {
-        const costR = await fetch(`${API}/last_run_cost`);
-        const cost = await costR.json();
-        if (cost.phase1_model === 'ollama') {
-          const claudeEur = (cost.cost_eur * 100).toFixed(3);
-          costStr = `<br>Kosten: ~0.00¢ (Ollama)${cost.input_tokens > 0 ? ` + ~${claudeEur}¢ (Claude Meta)` : ''}`;
-        } else if (cost.input_tokens > 0) {
-          const eur = (cost.cost_eur * 100).toFixed(2);
-          const inK = (cost.input_tokens / 1000).toFixed(1);
-          const outK = (cost.output_tokens / 1000).toFixed(1);
-          costStr = `<br>Kosten: ~${eur}¢ (${inK}K in / ${outK}K out · ${cost.calls} Calls)`;
-        }
-      } catch {}
-
-      const stubStr = data.stubs_created > 0
-        ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt`
-        : '';
-      setStatus('success',
-        `Notiz erstellt: <strong>${data.filename}</strong><br>` +
-        `Modell: ${data.model_used} · ${data.chunks} Chunk(s) · ${data.wikilinks_total} Wikilinks gesetzt${costStr}${stubStr}`
-      );
-      showToast('Notiz gespeichert ✓');
-      loadVaultTree();
-      resetDrop();
+      if (data.status === 'review_ready') {
+        currentDraft = data.draft;
+        reviewMergedTerms = [];
+        reviewIgnoredDups = new Set();
+        reviewAllSelected = true;
+        resetDrop();
+        // bypass showPage confirm since draft was just created
+        pageHome.classList.remove('active');
+        pageReview.classList.add('active');
+        btnHome.style.display = 'flex';
+        btnSettings.style.display = 'none';
+        btnTokens.style.display = 'none';
+        renderReview();
+      }
     } catch (e) {
       setStatus('error', `Verbindung zum Backend fehlgeschlagen. Läuft uvicorn auf Port 5050?`);
     } finally {
@@ -1108,6 +1200,195 @@
       const data = await r.json();
       showToast(`${data.cleaned} Stubs bereinigt`);
     } catch { showToast('Backend nicht erreichbar'); }
+  });
+
+  // Review page
+  const FILTER_LABELS = {
+    impressum: 'Impressum', figure_ref: 'Abbildung', technical: 'URL/Tech',
+    too_short: 'zu kurz', number_or_year: 'Zahl', unknown: 'gefiltert',
+  };
+
+  function renderReview() {
+    if (!currentDraft) return;
+    const d = currentDraft;
+
+    document.getElementById('review-filename').textContent = `Review: ${d.filename}`;
+    const s = d.stats;
+    document.getElementById('review-stats').textContent =
+      `${s.links_total} Links erkannt · ${s.filtered} gefiltert · ${s.new} neue Begriffe`;
+
+    const c = d.cost;
+    if (c && (c.input_tokens > 0 || c.phase1_model === 'ollama')) {
+      const eurCents = ((c.input_tokens * 0.0000008 + c.output_tokens * 0.000004) * 0.92 * 100).toFixed(3);
+      const costStr = c.phase1_model === 'ollama'
+        ? `~0.00¢ (Ollama)${c.input_tokens > 0 ? ` + ~${eurCents}¢ (Claude Meta)` : ''}`
+        : `~${eurCents}¢`;
+      document.getElementById('review-cost-info').textContent =
+        `${s.model_used} · ${s.chunks} Chunks · ${costStr}`;
+    }
+
+    renderTokenList();
+    renderReviewDuplicates();
+  }
+
+  function renderTokenList() {
+    if (!currentDraft) return;
+    const tokens = currentDraft.tokens;
+    const selected = tokens.filter(t => t.selected);
+    const unselected = tokens.filter(t => !t.selected);
+    const newCount = tokens.filter(t => t.is_new && t.selected).length;
+    document.getElementById('review-new-count').textContent = `(${newCount})`;
+
+    const list = document.getElementById('review-token-list');
+    list.innerHTML = [...selected, ...unselected].map(t => {
+      const cacheBadge = !t.is_new
+        ? '<span class="tbadge cache">cache</span>' : '';
+      const filterBadge = t.filtered_reason
+        ? `<span class="tbadge filtered">${FILTER_LABELS[t.filtered_reason] || t.filtered_reason}</span>` : '';
+      return `<div class="token-row">
+        <input type="checkbox" class="token-check" data-canonical="${esc(t.canonical)}" ${t.selected ? 'checked' : ''}>
+        <span class="token-label${t.filtered_reason ? ' dim' : ''}">${t.canonical}</span>
+        ${cacheBadge}${filterBadge}
+      </div>`;
+    }).join('');
+
+    list.querySelectorAll('.token-check').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const tok = currentDraft.tokens.find(t => t.canonical === cb.dataset.canonical);
+        if (tok) tok.selected = cb.checked;
+        const newCount = currentDraft.tokens.filter(t => t.is_new && t.selected).length;
+        document.getElementById('review-new-count').textContent = `(${newCount})`;
+      });
+    });
+  }
+
+  function renderReviewDuplicates() {
+    if (!currentDraft) return;
+    const dups = currentDraft.duplicate_suggestions || [];
+    const card = document.getElementById('review-dup-card');
+    const visible = dups.filter(([a, b]) => !reviewIgnoredDups.has(a + '|' + b));
+    if (!visible.length) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    document.getElementById('review-dup-count').textContent = `(${visible.length})`;
+    document.getElementById('review-dup-list').innerHTML = visible.map(([a, b]) => `
+      <div class="dup-pair">
+        <div class="dup-names">${a} <span>↔</span> ${b}</div>
+        <div class="dup-actions">
+          <button class="btn-merge" onclick="handleReviewMerge('${esc(a)}','${esc(b)}','${esc(a)}')">→ ${a}</button>
+          <button class="btn-merge" onclick="handleReviewMerge('${esc(a)}','${esc(b)}','${esc(b)}')">→ ${b}</button>
+          <button class="btn-ignore" onclick="ignoreReviewDup('${esc(a)}','${esc(b)}')">Ignorieren</button>
+        </div>
+      </div>`).join('');
+  }
+
+  function handleReviewMerge(a, b, keep) {
+    const remove = keep === a ? b : a;
+    reviewMergedTerms.push({ keep, remove });
+    const tok = currentDraft.tokens.find(t => t.canonical === remove);
+    if (tok) tok.selected = false;
+    reviewIgnoredDups.add(a + '|' + b);
+    renderTokenList();
+    renderReviewDuplicates();
+    showToast(`"${remove}" → "${keep}"`);
+  }
+
+  function ignoreReviewDup(a, b) {
+    reviewIgnoredDups.add(a + '|' + b);
+    renderReviewDuplicates();
+  }
+
+  document.getElementById('btn-toggle-all').addEventListener('click', () => {
+    reviewAllSelected = !reviewAllSelected;
+    currentDraft.tokens.forEach(t => { if (!t.filtered_reason) t.selected = reviewAllSelected; });
+    document.getElementById('btn-toggle-all').textContent = reviewAllSelected ? 'Alle ✓' : 'Alle ☐';
+    renderTokenList();
+  });
+
+  document.getElementById('btn-confirm-review').addEventListener('click', async () => {
+    if (!currentDraft) return;
+    const selectedTerms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
+    const btn = document.getElementById('btn-confirm-review');
+    btn.disabled = true;
+    btn.textContent = 'Speichert…';
+    try {
+      const r = await fetch(`${API}/process/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected_terms: selectedTerms, merged_terms: reviewMergedTerms }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        const draft = currentDraft;
+        currentDraft = null;
+        reviewMergedTerms = [];
+        pageReview.classList.remove('active');
+        pageHome.classList.add('active');
+        btnHome.style.display = 'none';
+        btnSettings.style.display = 'flex';
+        btnTokens.style.display = 'flex';
+        const stubStr = data.stubs_created > 0 ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt` : '';
+        setStatus('success',
+          `Notiz erstellt: <strong>${data.filename}</strong><br>` +
+          `Modell: ${data.model_used} · ${data.wikilinks_total} Wikilinks gesetzt${stubStr}`
+        );
+        showToast('Notiz gespeichert ✓');
+        loadVaultTree();
+      } else {
+        showToast(`Fehler: ${data.detail || r.statusText}`);
+        btn.disabled = false;
+        btn.textContent = 'Speichern';
+      }
+    } catch {
+      showToast('Backend nicht erreichbar');
+      btn.disabled = false;
+      btn.textContent = 'Speichern';
+    }
+  });
+
+  document.getElementById('btn-cancel-review').addEventListener('click', () => {
+    if (!confirm('Entwurf verwerfen? Nichts wird gespeichert.')) return;
+    currentDraft = null;
+    reviewMergedTerms = [];
+    pageReview.classList.remove('active');
+    pageHome.classList.add('active');
+    btnHome.style.display = 'none';
+    btnSettings.style.display = 'flex';
+    btnTokens.style.display = 'flex';
+    resetDrop();
+  });
+
+  document.getElementById('btn-quality-pass').addEventListener('click', async () => {
+    if (!currentDraft) return;
+    const terms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
+    if (!terms.length) { showToast('Keine aktiven Begriffe'); return; }
+    const btn = document.getElementById('btn-quality-pass');
+    btn.disabled = true;
+    btn.textContent = 'Claude analysiert…';
+    try {
+      const r = await fetch(`${API}/process/quality_pass`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ terms }),
+      });
+      const data = await r.json();
+      if (r.ok && Array.isArray(data.remove)) {
+        const removeSet = new Set(data.remove);
+        let count = 0;
+        currentDraft.tokens.forEach(t => {
+          if (removeSet.has(t.canonical) && t.selected) { t.selected = false; count++; }
+        });
+        renderTokenList();
+        showToast(`Claude: ${count} Begriff${count !== 1 ? 'e' : ''} deaktiviert`);
+      } else if (data.detail === 'claude_api_key_missing') {
+        showToast('Claude API Key nicht gesetzt');
+      } else {
+        showToast('Quality Pass fehlgeschlagen');
+      }
+    } catch { showToast('Backend nicht erreichbar'); }
+    finally {
+      btn.disabled = false;
+      btn.textContent = 'Nochmal mit Claude';
+    }
   });
 
   // Init

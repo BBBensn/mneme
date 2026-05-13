@@ -55,6 +55,7 @@ _last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0,
                          "phase1_model": "", "meta_model": ""}
 _processing_status: dict = {"active": False, "stage": "", "progress": 0.0,
                              "chunk_current": 0, "chunk_total": 0}
+_pending_draft: dict | None = None
 
 _IMPRINT_BLACKLIST = frozenset({
     "abonnement", "anzeigen", "verlag", "issn", "doi", "isbn", "druck",
@@ -534,6 +535,69 @@ def count_backlinks(vault_path: str, term: str) -> int:
     return count
 
 
+def _noise_reason(term: str) -> str | None:
+    t = term.strip()
+    tl = t.lower()
+    if tl in _IMPRINT_BLACKLIST:
+        return "impressum"
+    if any(tl.startswith(p) for p in _FIGURE_PREFIXES):
+        return "figure_ref"
+    if any(x in t for x in ("www.", ".de", ".com", "http", "@")):
+        return "technical"
+    if len(t) < 4:
+        return "too_short"
+    if re.fullmatch(r'[\d\s\.\-/]+', t):
+        return "number_or_year"
+    return None
+
+
+def filter_noisy_terms(terms: list[dict]) -> tuple[list[dict], list[dict]]:
+    kept, filtered = [], []
+    for term in terms:
+        reason = _noise_reason(term["canonical"])
+        if reason:
+            filtered.append({**term, "filtered_reason": reason})
+        else:
+            kept.append(term)
+    return kept, filtered
+
+
+def find_review_duplicates(terms: list[dict]) -> list[list[str]]:
+    canonicals = [t["canonical"] for t in terms]
+    pairs: list[list[str]] = []
+    seen: set[tuple] = set()
+    for i in range(len(canonicals)):
+        a_l = canonicals[i].lower()
+        for j in range(i + 1, len(canonicals)):
+            b_l = canonicals[j].lower()
+            key = (min(canonicals[i], canonicals[j]), max(canonicals[i], canonicals[j]))
+            if key in seen:
+                continue
+            if (re.search(r'\b' + re.escape(a_l) + r'\b', b_l) or
+                    re.search(r'\b' + re.escape(b_l) + r'\b', a_l)):
+                pairs.append([canonicals[i], canonicals[j]])
+                seen.add(key)
+                if len(pairs) >= 20:
+                    return pairs
+    return pairs
+
+
+def build_quality_pass_prompt(terms: list[str]) -> str:
+    terms_text = "\n".join(f"- {t}" for t in terms)
+    return (
+        "Du überprüfst eine Liste von Begriffen die als Wikilinks in einem wissenschaftlichen Text gesetzt werden sollen.\n"
+        "Identifiziere Begriffe die eindeutig KEIN sinnvoller Wikilink-Begriff sind:\n"
+        "- Generische Alltagswörter ohne Fachbezug im wissenschaftlichen Kontext\n"
+        "- Reine Funktionswörter oder grammatische Formen\n"
+        "- Druckdaten, Impressumsbegriffe, Abbildungsreferenzen\n"
+        "BEHALTE: Personennamen, Fachbegriffe, Konzepte, Institutionen, Werktitel — auch wenn scheinbar allgemein.\n"
+        "Entferne NUR eindeutige False Positives.\n\n"
+        f"Begriffe:\n{terms_text}\n\n"
+        "Antworte NUR mit einer JSON-Liste der zu entfernenden Begriffe: [\"Begriff1\", \"Begriff2\", ...]\n"
+        "Wenn alle Begriffe sinnvoll sind: []"
+    )
+
+
 # --- Endpoints ---
 
 @app.get("/")
@@ -566,6 +630,15 @@ class MergeRequest(BaseModel):
     remove: str
 
 
+class ConfirmRequest(BaseModel):
+    selected_terms: list[str]
+    merged_terms: list[dict] = []
+
+
+class QualityPassRequest(BaseModel):
+    terms: list[str]
+
+
 @app.post("/config")
 def update_config(update: ConfigUpdate):
     cfg = load_config()
@@ -581,7 +654,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.1.0"
+MNEME_VERSION = "2.2.0"
 
 
 @app.get("/version")
@@ -703,6 +776,96 @@ async def ollama_status():
 @app.get("/process/status")
 def get_process_status():
     return _processing_status
+
+
+@app.post("/process/confirm")
+def confirm_process(req: ConfirmRequest):
+    global _pending_draft
+    if not _pending_draft:
+        raise HTTPException(status_code=400, detail="no_pending_draft")
+
+    draft = _pending_draft
+    vault_path = draft["vault_path"]
+    selected_set = set(req.selected_terms)
+
+    selected_new = [t for t in draft["new_terms"] if t["canonical"] in selected_set]
+
+    for merge in req.merged_terms:
+        keep_c = merge.get("keep")
+        remove_c = merge.get("remove")
+        if not keep_c or not remove_c:
+            continue
+        keep_term = next((t for t in selected_new if t["canonical"] == keep_c), None)
+        if keep_term:
+            remove_term = next((t for t in draft["new_terms"] if t["canonical"] == remove_c), None)
+            if remove_term:
+                keep_term["aliases"] = sorted(
+                    set(keep_term.get("aliases", [])) | set(remove_term.get("aliases", [])) | {remove_c}
+                )
+        selected_new = [t for t in selected_new if t["canonical"] != remove_c]
+
+    final_terms = merge_terms(
+        [draft["cached_terms"], selected_new],
+        draft["base_links"],
+        draft["vault_links"],
+        draft["full_text"],
+    )
+    content = apply_wikilinks(draft["frontmatter"] + draft["full_text"], final_terms)
+    total_links = len(re.findall(r"\[\[.+?\]\]", content))
+
+    output_filename = draft["output_filename"]
+    (Path(vault_path) / output_filename).write_text(content, encoding="utf-8")
+
+    save_token_cache(vault_path, selected_new)
+
+    if req.merged_terms:
+        tok_path = Path(vault_path) / TOKENS_FILENAME
+        try:
+            data = json.loads(tok_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        for merge in req.merged_terms:
+            keep_c = merge.get("keep")
+            remove_c = merge.get("remove")
+            if keep_c in data and remove_c in data:
+                data[keep_c] = sorted(
+                    set(data.get(keep_c, [])) | set(data.get(remove_c, [])) | {remove_c}
+                )
+                del data[remove_c]
+                rename_wikilinks_in_vault(vault_path, remove_c, keep_c)
+        tok_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', content))
+    stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename)
+    logger.info("CONFIRMED: %d links | %d stubs | %s", total_links, stubs_created, output_filename)
+
+    _pending_draft = None
+    return {
+        "ok": True,
+        "filename": output_filename,
+        "wikilinks_total": total_links,
+        "stubs_created": stubs_created,
+        "stubs_existing": stubs_existing,
+        "model_used": f"{_last_run_stats.get('phase1_model', '')}/{_last_run_stats.get('meta_model', '')}",
+    }
+
+
+@app.post("/process/quality_pass")
+def quality_pass(req: QualityPassRequest):
+    cfg = load_config()
+    api_key = get_anthropic_key(cfg)
+    if not api_key.strip():
+        raise HTTPException(status_code=400, detail="claude_api_key_missing")
+    try:
+        raw = call_claude(api_key, build_quality_pass_prompt(req.terms), max_tokens=512)
+        m = re.search(r'\[.*?\]', raw, re.DOTALL)
+        remove = json.loads(m.group()) if m else []
+        if not isinstance(remove, list):
+            remove = []
+    except Exception as e:
+        logger.warning("Quality pass fehlgeschlagen: %s", e)
+        raise HTTPException(status_code=500, detail=f"quality_pass_error: {e}")
+    return {"remove": [str(r) for r in remove]}
 
 
 @app.get("/wikilinks")
@@ -838,12 +1001,20 @@ async def _process_pdf_inner(file: UploadFile, model: str):
     _processing_status["stage"] = "Begriffe werden zusammengeführt..."
     _processing_status["progress"] = 0.82
 
-    all_terms = merge_terms([cached_terms] + term_lists, base_links, vault_links, full_text)
-    logger.info("TERMS GESAMT: %d (davon %d aus Cache)", len(all_terms), len(cached_terms))
+    # Merge only AI-generated terms from this run (base/vault links added later on confirm)
+    cached_canonical = set(token_cache.keys())
+    raw_new_terms = merge_terms(term_lists, [], [], full_text)
 
-    # Phase 2 — Python-Ersetzung
+    kept_new, filtered_new = filter_noisy_terms(raw_new_terms)
+    logger.info("NOISE FILTER: %d behalten, %d gefiltert", len(kept_new), len(filtered_new))
+
+    truly_new_count = sum(1 for t in kept_new if t["canonical"] not in cached_canonical)
+
     _processing_status["stage"] = "Wikilinks werden gesetzt..."
     _processing_status["progress"] = 0.88
+
+    # Preview content: cached + kept_new + base/vault links
+    preview_terms = merge_terms([cached_terms, kept_new], base_links, vault_links, full_text)
 
     source_pdf = file.filename or "document.pdf"
     frontmatter = (
@@ -857,30 +1028,60 @@ async def _process_pdf_inner(file: UploadFile, model: str):
         f"mneme_version: {MNEME_VERSION}\n"
         f"---\n\n"
     )
-    result = apply_wikilinks(frontmatter + full_text, all_terms)
-
-    total_links = len(re.findall(r"\[\[.+?\]\]", result))
-    logger.info("TOTAL LINKS: %d | TERMS: %d | TOKENS in/out: %d/%d",
-                total_links, len(all_terms),
-                _last_run_stats["input_tokens"], _last_run_stats["output_tokens"])
-
-    save_token_cache(vault_path, all_terms)
+    preview_content = apply_wikilinks(frontmatter + full_text, preview_terms)
+    total_links = len(re.findall(r"\[\[.+?\]\]", preview_content))
     output_filename = derive_output_filename(meta, source_pdf)
-    (Path(vault_path) / output_filename).write_text(result, encoding="utf-8")
 
-    _processing_status["stage"] = "Stubs werden erstellt..."
+    _processing_status["stage"] = "Review wird vorbereitet..."
     _processing_status["progress"] = 0.94
 
-    found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', result))
-    stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename)
-    logger.info("STUBS: %d erstellt, %d existieren", stubs_created, stubs_existing)
+    dup_suggestions = find_review_duplicates(kept_new)
+
+    token_list = [
+        {"canonical": t["canonical"], "is_new": t["canonical"] not in cached_canonical,
+         "selected": True, "filtered_reason": None}
+        for t in kept_new
+    ] + [
+        {"canonical": t["canonical"], "is_new": t["canonical"] not in cached_canonical,
+         "selected": False, "filtered_reason": t.get("filtered_reason", "unknown")}
+        for t in filtered_new
+    ]
+
+    global _pending_draft
+    _pending_draft = {
+        "vault_path": vault_path,
+        "source_pdf": source_pdf,
+        "frontmatter": frontmatter,
+        "full_text": full_text,
+        "output_filename": output_filename,
+        "cached_terms": cached_terms,
+        "new_terms": kept_new + filtered_new,
+        "base_links": base_links,
+        "vault_links": vault_links,
+    }
+
+    logger.info("REVIEW READY: %d kept (%d new, %d filtered) | %d links | %s",
+                len(kept_new), truly_new_count, len(filtered_new), total_links, output_filename)
 
     return {
-        "ok": True,
-        "filename": output_filename,
-        "model_used": f"{phase1_model}/{meta_model}",
-        "wikilinks_total": total_links,
-        "chunks": len(p1_chunks),
-        "stubs_created": stubs_created,
-        "stubs_existing": stubs_existing,
+        "status": "review_ready",
+        "draft": {
+            "filename": output_filename,
+            "content": preview_content,
+            "tokens": token_list,
+            "duplicate_suggestions": dup_suggestions,
+            "stats": {
+                "links_total": total_links,
+                "filtered": len(filtered_new),
+                "new": truly_new_count,
+                "existing": len(cached_terms),
+                "model_used": f"{phase1_model}/{meta_model}",
+                "chunks": len(p1_chunks),
+            },
+            "cost": {
+                "input_tokens": _last_run_stats["input_tokens"],
+                "output_tokens": _last_run_stats["output_tokens"],
+                "phase1_model": phase1_model,
+            },
+        },
     }
