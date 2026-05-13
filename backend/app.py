@@ -329,12 +329,29 @@ def derive_output_filename(meta: dict, fallback: str) -> str:
 
 
 _METHOD_KEYWORDS = {"methode", "analyse", "forschung", "ansatz", "verfahren"}
+_NOT_PERSON_WORDS = {
+    "soziale", "sozial", "medien", "soziologie", "soziologisch",
+    "sozialwissenschaft", "institut", "universität", "university",
+    "methode", "analyse", "forschung", "theorie", "modell",
+    "gesellschaft", "wissenschaft", "bildung", "kunst", "raum",
+    "kultur", "politik", "system", "netzwerk", "plattform",
+}
+
+
+def should_create_stub(name: str) -> bool:
+    if len(name.strip()) < 2:
+        return False
+    # Skip single lowercase words (adjectives/inflections like "bildliche", "affektive")
+    if ' ' not in name and name[0].islower():
+        return False
+    return True
 
 
 def get_stub_folder(name: str) -> str:
     parts = name.split()
-    if (len(parts) == 2 and
-            all(p[0].isupper() and p.replace('-', '').isalpha() for p in parts)):
+    if (len(parts) >= 2 and
+            all(p[0].isupper() and p.replace('-', '').isalpha() for p in parts) and
+            not any(p.lower() in _NOT_PERSON_WORDS for p in parts)):
         return "Personen"
     if any(kw in name.lower() for kw in _METHOD_KEYWORDS):
         return "Methoden"
@@ -344,13 +361,12 @@ def get_stub_folder(name: str) -> str:
 def create_stubs(vault_path: str, wikilinks: set[str], source_filename: str) -> tuple[int, int]:
     vault = Path(vault_path)
     today = datetime.date.today().isoformat()
-    source_stem = Path(source_filename).stem
     existing_names = {f.stem for f in vault.rglob("*.md")}
     created = 0
     existing = 0
     for name in sorted(wikilinks):
         safe = re.sub(r'[<>:"/\\|?*\n\r]', '', name).strip()
-        if not safe or len(safe) < 2:
+        if not safe or not should_create_stub(safe):
             continue
         if safe in existing_names:
             existing += 1
@@ -358,15 +374,47 @@ def create_stubs(vault_path: str, wikilinks: set[str], source_filename: str) -> 
         folder = get_stub_folder(safe)
         stub_dir = vault / folder
         stub_dir.mkdir(exist_ok=True)
-        content = (
-            f"---\ntitle: {safe}\ntags:\n  - concept\ncreated: {today}\n---\n"
-            f"# {safe}\n\n"
-            f"> Stub — noch kein Inhalt. Verlinkt in: [[{source_stem}]]\n"
-        )
+        content = f"---\ntitle: {safe}\ntags:\n  - concept\ncreated: {today}\n---\n"
         (stub_dir / f"{safe}.md").write_text(content, encoding="utf-8")
         existing_names.add(safe)
         created += 1
     return created, existing
+
+
+def cleanup_existing_stubs(vault_path: str) -> int:
+    cleaned = 0
+    for folder in ("Personen", "Methoden", "Konzepte"):
+        for md_file in (Path(vault_path) / folder).glob("*.md"):
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                if not content.startswith("---\n") or "- concept" not in content[:300]:
+                    continue
+                end = content.find("\n---\n", 4)
+                if end == -1:
+                    continue
+                frontmatter = content[:end + 5]
+                if content.rstrip() == frontmatter.rstrip():
+                    continue
+                md_file.write_text(frontmatter, encoding="utf-8")
+                cleaned += 1
+            except Exception:
+                pass
+    return cleaned
+
+
+def find_duplicate_pairs(cache: dict) -> list[dict]:
+    terms = [k for k in cache if not k.startswith("_")]
+    pairs = []
+    for i in range(len(terms)):
+        a_l = terms[i].lower()
+        for j in range(i + 1, len(terms)):
+            b_l = terms[j].lower()
+            if (re.search(r'\b' + re.escape(a_l) + r'\b', b_l) or
+                    re.search(r'\b' + re.escape(b_l) + r'\b', a_l)):
+                pairs.append({"a": terms[i], "b": terms[j]})
+                if len(pairs) >= 100:
+                    return pairs
+    return pairs
 
 
 # --- Endpoints ---
@@ -396,6 +444,11 @@ class ConfigUpdate(BaseModel):
     ollama_model: str | None = None
 
 
+class MergeRequest(BaseModel):
+    keep: str
+    remove: str
+
+
 @app.post("/config")
 def update_config(update: ConfigUpdate):
     cfg = load_config()
@@ -411,7 +464,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "1.8.0"
+MNEME_VERSION = "1.9.0"
 
 
 @app.get("/version")
@@ -432,6 +485,54 @@ def last_run_cost():
         "cost_eur": round(cost_eur, 5),
         "calls": _last_run_stats["calls"],
     }
+
+
+@app.get("/tokens")
+def get_tokens():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        return {"tokens": {}, "duplicates": [], "count": 0}
+    cache = load_token_cache(vault_path)
+    return {"tokens": cache, "duplicates": find_duplicate_pairs(cache), "count": len(cache)}
+
+
+@app.post("/tokens/merge")
+def merge_token_terms(req: MergeRequest):
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path:
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    tok_path = Path(vault_path) / TOKENS_FILENAME
+    try:
+        data = json.loads(tok_path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=404, detail="tokens_not_found")
+    if req.keep not in data or req.remove not in data:
+        raise HTTPException(status_code=404, detail="term_not_found")
+    keep_al = set(data[req.keep]) if isinstance(data[req.keep], list) else set()
+    remove_al = set(data[req.remove]) if isinstance(data[req.remove], list) else set()
+    data[req.keep] = sorted(keep_al | remove_al | {req.remove})
+    del data[req.remove]
+    tok_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    stub_deleted = False
+    for folder in ("Personen", "Methoden", "Konzepte"):
+        p = Path(vault_path) / folder / f"{req.remove}.md"
+        if p.exists():
+            p.unlink()
+            stub_deleted = True
+            break
+    return {"ok": True, "stub_deleted": stub_deleted}
+
+
+@app.post("/stubs/cleanup")
+def cleanup_stubs_endpoint():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    cleaned = cleanup_existing_stubs(vault_path)
+    return {"ok": True, "cleaned": cleaned}
 
 
 @app.get("/vault/tree")

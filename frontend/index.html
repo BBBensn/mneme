@@ -419,6 +419,48 @@
     .tree-children.open { display: block; }
     .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tree-file:hover { color: var(--accent); }
+
+    /* Token management */
+    .token-stats { font-size: 13px; color: var(--text2); margin-bottom: 20px; }
+    .dup-pair {
+      background: var(--surface2);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
+      margin-bottom: 10px;
+    }
+    .dup-names {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+    .dup-names span { color: var(--text2); margin: 0 6px; }
+    .dup-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn-merge {
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-merge:hover { background: var(--accent-hover); }
+    .btn-ignore {
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      background: none;
+      color: var(--text2);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-ignore:hover { background: var(--surface2); }
+    .no-dups { font-size: 14px; color: var(--text2); text-align: center; padding: 32px 0; }
   </style>
 </head>
 <body>
@@ -435,6 +477,12 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+    <button class="btn-icon" id="btn-tokens" title="Token-Verwaltung">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+        <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
       </svg>
     </button>
     <button class="btn-icon" id="btn-home" title="Home" style="display:none">
@@ -566,6 +614,24 @@
 
   </div>
 
+  <!-- Tokens page -->
+  <div class="page" id="page-tokens">
+
+    <div class="card">
+      <div class="card-title">Token-Verwaltung</div>
+      <div class="token-stats" id="token-stats">Lade…</div>
+      <button class="btn-secondary" id="btn-cleanup-stubs" style="font-size:13px;padding:8px 14px">
+        Stubs bereinigen (Body-Text entfernen)
+      </button>
+    </div>
+
+    <div class="card" id="dup-card">
+      <div class="card-title">Mögliche Duplikate <span id="dup-count" style="color:var(--text2);font-weight:400"></span></div>
+      <div id="dup-list"></div>
+    </div>
+
+  </div>
+
 </main>
 
 <div id="toast"></div>
@@ -581,8 +647,10 @@
   // Elements
   const pageHome = document.getElementById('page-home');
   const pageSettings = document.getElementById('page-settings');
+  const pageTokens = document.getElementById('page-tokens');
   const btnSettings = document.getElementById('btn-settings');
   const btnHome = document.getElementById('btn-home');
+  const btnTokens = document.getElementById('btn-tokens');
   const dropZone = document.getElementById('drop-zone');
   const fileInput = document.getElementById('file-input');
   const btnProcess = document.getElementById('btn-process');
@@ -598,21 +666,18 @@
   // Navigation
   btnSettings.addEventListener('click', () => showPage('settings'));
   btnHome.addEventListener('click', () => showPage('home'));
+  btnTokens.addEventListener('click', () => showPage('tokens'));
   document.getElementById('banner-settings-link').addEventListener('click', () => showPage('settings'));
 
   function showPage(page) {
-    if (page === 'settings') {
-      pageHome.classList.remove('active');
-      pageSettings.classList.add('active');
-      btnSettings.style.display = 'none';
-      btnHome.style.display = 'flex';
-      loadSettings();
-    } else {
-      pageSettings.classList.remove('active');
-      pageHome.classList.add('active');
-      btnSettings.style.display = 'flex';
-      btnHome.style.display = 'none';
-    }
+    pageHome.classList.toggle('active', page === 'home');
+    pageSettings.classList.toggle('active', page === 'settings');
+    pageTokens.classList.toggle('active', page === 'tokens');
+    btnSettings.style.display = page === 'settings' ? 'none' : 'flex';
+    btnHome.style.display = page === 'home' ? 'none' : 'flex';
+    btnTokens.style.display = page === 'tokens' ? 'none' : 'flex';
+    if (page === 'settings') loadSettings();
+    if (page === 'tokens') loadTokenPage();
   }
 
   // Ollama status
@@ -919,6 +984,75 @@
       });
     } catch {}
   }
+
+  // Token-Verwaltung
+  let ignoredPairs = new Set();
+
+  async function loadTokenPage() {
+    document.getElementById('token-stats').textContent = 'Lade…';
+    document.getElementById('dup-list').innerHTML = '';
+    try {
+      const r = await fetch(`${API}/tokens`);
+      const data = await r.json();
+      document.getElementById('token-stats').textContent =
+        `${data.count} Begriffe in tokens.json`;
+      renderDuplicates(data.duplicates || []);
+    } catch {
+      document.getElementById('token-stats').textContent = 'Backend nicht erreichbar';
+    }
+  }
+
+  function renderDuplicates(pairs) {
+    const list = document.getElementById('dup-list');
+    const visible = pairs.filter(p => !ignoredPairs.has(p.a + '|' + p.b));
+    document.getElementById('dup-count').textContent = `(${visible.length})`;
+    if (!visible.length) {
+      list.innerHTML = '<div class="no-dups">Keine Duplikate gefunden</div>';
+      return;
+    }
+    list.innerHTML = visible.map(p => `
+      <div class="dup-pair" id="pair-${btoa(p.a + p.b).slice(0,8)}">
+        <div class="dup-names">${p.a} <span>↔</span> ${p.b}</div>
+        <div class="dup-actions">
+          <button class="btn-merge" onclick="handleMerge('${esc(p.a)}','${esc(p.b)}','${esc(p.a)}')">→ ${p.a}</button>
+          <button class="btn-merge" onclick="handleMerge('${esc(p.a)}','${esc(p.b)}','${esc(p.b)}')">→ ${p.b}</button>
+          <button class="btn-ignore" onclick="ignorePair('${esc(p.a)}','${esc(p.b)}')">Ignorieren</button>
+        </div>
+      </div>`).join('');
+  }
+
+  function esc(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+  async function handleMerge(a, b, keep) {
+    const remove = keep === a ? b : a;
+    try {
+      const r = await fetch(`${API}/tokens/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keep, remove }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        showToast(`Zusammengeführt: "${remove}" → "${keep}"${data.stub_deleted ? ' · Stub gelöscht' : ''}`);
+        loadTokenPage();
+      } else {
+        showToast('Fehler beim Zusammenführen');
+      }
+    } catch { showToast('Backend nicht erreichbar'); }
+  }
+
+  function ignorePair(a, b) {
+    ignoredPairs.add(a + '|' + b);
+    loadTokenPage();
+  }
+
+  document.getElementById('btn-cleanup-stubs').addEventListener('click', async () => {
+    try {
+      const r = await fetch(`${API}/stubs/cleanup`, { method: 'POST' });
+      const data = await r.json();
+      showToast(`${data.cleaned} Stubs bereinigt`);
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
 
   // Init
   checkVersion();
