@@ -74,7 +74,7 @@ Teilprojekt von [[J-Vault]].
 
 ## Offene Fragen / Bekannte Probleme
 
-- **Speichern-Bug (intermittierend):** Tritt nach Rerun auf, Speichern-Button bleibt ausgegraut. Möglicherweise identisch mit Alias-Konflikt-Bug (v2.9 gefixt). Nach v2.9 erneut beobachten ob noch auftritt.
+- **Speichern-Bug:** Behoben in v2.9.1. Ursache war fehlender Button-Reset (`btn.disabled = false`) in der Success-Branch des Confirm-Handlers — DOM-Button blieb disabled und war beim nächsten Review ausgegraut.
 - **tokens.json Skalierung:** Wie gut skaliert bei 100+ Papers? Ab wann wird Lookup langsam?
 - **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks (gebatchte Aufrufe: >5 Batches) noch ungeprüft ob Ollama die größeren Input-Texte korrekt verarbeitet.
 

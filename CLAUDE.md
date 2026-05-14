@@ -12,7 +12,7 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 ## Projekt-Basics
 
 - **Name:** mneme
-- **Version:** v2.9.0
+- **Version:** v2.9.1
 - **Status:** active
 - **Stack:** Vanilla JS + FastAPI + pymupdf + Ollama + Anthropic SDK
 - **Läuft lokal auf:** MacBook (kein Server-Deploy)

@@ -1103,7 +1103,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.0"
+MNEME_VERSION = "2.9.1"
 
 
 @app.get("/version")

@@ -1647,6 +1647,8 @@
       });
       const data = await r.json();
       if (r.ok) {
+        btn.disabled = false;
+        btn.textContent = 'Speichern';
         currentDraft = null;
         reviewMergedTerms = [];
         reviewIsBulk = false;
