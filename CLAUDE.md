@@ -12,7 +12,7 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 ## Projekt-Basics
 
 - **Name:** mneme
-- **Version:** v2.7.0
+- **Version:** v2.8.0
 - **Status:** active
 - **Stack:** Vanilla JS + FastAPI + pymupdf + Ollama + Anthropic SDK
 - **Läuft lokal auf:** MacBook (kein Server-Deploy)
@@ -179,7 +179,8 @@ date_modified: 2026-05-14 14:45:00
 | v2.5    | YAML Fix, Dataview Autoren, Sections-Erkennung, Buch-Modus | ✅ done |
 | v2.6    | YAML Citation Fix, 2-Spalten-Extraktion, Prompt-Caching, Timer | ✅ done |
 | v2.7    | Header-Cleanup, Job-Log, Vault Reset, mm:ss Timer    | ✅ done     |
-| v2.8    | Token-Review Tab (Claude prüft tokens.json)          | geplant     |
+| v2.8    | Bugfixes: Titel, Header, Autoren-Links, fix-stubs    | ✅ done     |
+| v2.9    | Vault Explorer: Token-Liste, Merge-UI                | geplant     |
 | v3.0    | Bulk-Verarbeitung (RAW-Data Batch)                   | geplant     |
 | v3.x    | Literatursuche via Claude API                        | geplant     |
 

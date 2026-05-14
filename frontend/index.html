@@ -816,6 +816,9 @@
         <button class="btn-secondary" id="btn-migrate-tokens" style="font-size:13px;padding:8px 14px">
           Auf v2.4 migrieren
         </button>
+        <button class="btn-secondary" id="btn-fix-author-stubs" style="font-size:13px;padding:8px 14px">
+          Autoren-Stubs reparieren
+        </button>
         <button class="btn-danger" id="btn-vault-reset" style="font-size:13px;padding:8px 14px">
           Vault Reset
         </button>
@@ -1346,6 +1349,15 @@
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
+  document.getElementById('btn-fix-author-stubs').addEventListener('click', async () => {
+    try {
+      const r = await fetch(`${API}/authors/fix-stubs`, { method: 'POST' });
+      const data = await r.json();
+      if (r.ok) showToast(`Autoren-Stubs: ${data.fixed} repariert, ${data.skipped} übersprungen`);
+      else showToast(`Fehler: ${data.detail || r.statusText}`);
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
+
   document.getElementById('btn-vault-reset').addEventListener('click', async () => {
     if (!confirm('Alle Stubs (Personen/, Methoden/, Konzepte/) und tokens.json löschen?\nLiterature Notes bleiben erhalten.')) return;
     try {
@@ -1600,6 +1612,8 @@
   });
 
   document.getElementById('btn-confirm-review').addEventListener('click', async () => {
+    // TODO v2.8: Speichern-Bug — tritt nach Rerun auf, Button bleibt ausgegraut. Noch nicht reproduzierbar.
+    console.log('[mneme] Speichern clicked. currentDraft:', currentDraft, 'btn disabled:', document.getElementById('btn-confirm-review').disabled);
     if (!currentDraft) return;
     const selectedTerms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
     const btn = document.getElementById('btn-confirm-review');

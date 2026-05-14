@@ -623,27 +623,58 @@ def parse_author_list(author_str: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def update_author_stub(vault_path: str, author: str, work: dict, affiliation: str = ""):
-    """Create author stub with Dataview body. Only creates if not existing."""
-    safe_name = re.sub(r'[<>:"/\\|?*\n\r]', '', author.split(",")[0].strip()[:50]).strip()
-    if len(safe_name) < 2:
-        return
-    stub_path = Path(vault_path) / "Personen" / f"{safe_name}.md"
-    if stub_path.exists():
-        return  # Dataview query handles works list dynamically
-    (Path(vault_path) / "Personen").mkdir(exist_ok=True)
-    today = datetime.date.today().isoformat()
-    content = (
-        f"---\ntitle: {safe_name}\ntags:\n  - person\n  - author\ntype: person\n"
-        f"created: {today}\n---\n\n"
-        f"## Werke\n\n"
+def get_author_stub_name(author: str) -> str:
+    """Canonical filesystem-safe name for an author stub."""
+    safe = re.sub(r'[<>:"/\\|?*\n\r]', '', author.strip()[:60])
+    safe = re.sub(r'\s+', ' ', safe).strip().rstrip('.')
+    return safe
+
+
+def format_author_yaml(author_str: str, authors_list: list[str]) -> str:
+    """Format author YAML with [[wikilinks]] for all authors."""
+    if not author_str:
+        return "author: ''\n"
+    first = get_author_stub_name(authors_list[0] if authors_list else author_str)
+    result = f"author: {yaml_str(f'[[{first}]]')}\n"
+    if len(authors_list) > 1:
+        result += "authors:\n"
+        for a in authors_list:
+            name = get_author_stub_name(a)
+            result += f"  - {yaml_str(f'[[{name}]]')}\n"
+    return result
+
+
+def _dataview_block(safe_name: str) -> str:
+    return (
+        f"\n## Werke\n\n"
         f"```dataview\n"
         f'TABLE year, journal FROM "/"\n'
         f'WHERE contains(string(author), "{safe_name}") OR contains(authors, "{safe_name}")\n'
         f"SORT year DESC\n"
         f"```\n"
     )
-    stub_path.write_text(content, encoding="utf-8")
+
+
+def update_author_stub(vault_path: str, author: str, work: dict, affiliation: str = ""):
+    """Create or repair author stub. Adds Dataview block if missing."""
+    safe_name = get_author_stub_name(author)
+    if len(safe_name) < 2:
+        return
+    stub_path = Path(vault_path) / "Personen" / f"{safe_name}.md"
+
+    if stub_path.exists():
+        content = stub_path.read_text(encoding="utf-8")
+        if "## Werke" not in content:
+            stub_path.write_text(content.rstrip() + _dataview_block(safe_name), encoding="utf-8")
+        return
+
+    (Path(vault_path) / "Personen").mkdir(exist_ok=True)
+    today = datetime.date.today().isoformat()
+    stub_path.write_text(
+        f"---\ntitle: {safe_name}\ntags:\n  - person\n  - author\ntype: person\n"
+        f"created: {today}\n---\n" + _dataview_block(safe_name),
+        encoding="utf-8",
+    )
 
 
 _COMBINED_SYSTEM_PROMPT = (
@@ -655,9 +686,10 @@ _COMBINED_SYSTEM_PROMPT = (
     "4. KLASSIFIZIERUNG: Markiere jeden Begriff als person / concept / method (oder null)\n"
     "5. ÜBERSETZUNG: Gib für jeden Begriff die deutsche (de) und englische (en) Form an\n"
     "6. METADATEN:\n"
-    "   - title: NUR der eigentliche Werktitel. NICHT der erste Satz des Abstracts.\n"
-    "     Titel steht meist auf Seite 1, vor dem Autorennamen, kürzer als 15 Wörter.\n"
-    "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
+    "   - title: NUR der eigentliche Werktitel. NIEMALS der erste Satz des Abstracts.\n"
+    "     NIEMALS ein Satzteil der mit einem Verb beginnt ('angebote setzen...' ist KEIN Titel).\n"
+    "     Der Titel steht als Heading auf Seite 1, VOR dem Autorennamen, kürzer als 15 Wörter.\n"
+    "     Wenn kein sicherer Titel erkennbar: null zurückgeben.\n"
     "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
     "   - citation_apa und citation_chicago: OHNE äußere Anführungszeichen, reiner Textstring\n"
     "   - body_start_marker: erste ~20 Wörter des echten Fließtexts (NICHT Titel/Abstract/Keywords/Instituts-/DOI-Block).\n"
@@ -849,31 +881,68 @@ _HEADER_LINE_PATTERNS = [
 ]
 
 
+def _extract_pdf_title(doc) -> str:
+    """Extract title from PDF metadata if valid (non-empty, not generic, not only symbols)."""
+    try:
+        title = (doc.metadata.get("title") or "").strip()
+        if (len(title) > 10 and
+                re.search(r'[A-Za-zÄÖÜäöüß]', title) and
+                not re.fullmatch(r'[\W\d\s]+', title) and
+                not re.search(r'Microsoft|Word|Document|Untitled|Template', title, re.IGNORECASE)):
+            if title.isupper():
+                title = title.title()
+            return title
+    except Exception:
+        pass
+    return ""
+
+
+def _is_noisy_header_line(line: str) -> bool:
+    """Return True if this line is typical journal header noise."""
+    s = line.strip()
+    if not s:
+        return False
+    checks = [
+        re.search(r'\bISSN\b', s, re.IGNORECASE),
+        re.search(r'\bDOI\s*:\s*10\.', s, re.IGNORECASE),
+        re.search(r'\bVol\.\s*\d|\bIssue\s*\d|\bpp?\.\s*\d|\bNo\.\s*\d', s),
+        re.search(r'www\.|https?://', s, re.IGNORECASE),
+        re.fullmatch(r'\s*\d+\s*', s),
+        re.search(r'[Pp]age\s+\d+|\|\s*P\s*a\s*g\s*e\b', s),
+        re.search(r'@\S+\.\w{2,4}', s),
+        re.search(r'Impact\s+Factor|Published\s+by|Copyright\s*©|All\s+rights\s+reserved', s, re.IGNORECASE),
+        (s.isupper() and len(s) < 60),
+    ]
+    return any(checks)
+
+
 def clean_header_text(text: str, body_start_marker: str = "") -> str:
-    """Remove journal header/title block before the actual body text."""
+    """Remove journal header noise. Step 1: body_start_marker. Step 2: noisy first-30-lines."""
+    # Step 1: body_start_marker → jump directly to body start
     if body_start_marker and len(body_start_marker) > 15:
         idx = text.find(body_start_marker[:60])
         if idx > 0:
-            return text[idx:]
+            text = text[idx:]
 
+    # Step 2: additionally clean remaining noisy lines in first 30 lines
     lines = text.split('\n')
-    body_start_line = 0
-    in_header = True
+    result = []
+    real_text_started = False
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if not stripped:
+        if real_text_started or i >= 30:
+            result.append(line)
             continue
-        is_header = (
-            any(p.match(line) for p in _HEADER_LINE_PATTERNS) or
-            len(stripped) < 5
-        )
-        if not is_header and len(stripped) > 40:
-            in_header = False
-        if not in_header:
-            body_start_line = i
-            break
+        if not stripped:
+            result.append(line)
+            continue
+        if _is_noisy_header_line(stripped):
+            continue  # skip noisy header line
+        if len(stripped) > 40:
+            real_text_started = True
+        result.append(line)
 
-    return '\n'.join(lines[body_start_line:]) if body_start_line else text
+    return '\n'.join(result)
 
 
 def log_job(job: dict):
@@ -1013,7 +1082,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.7.0"
+MNEME_VERSION = "2.8.0"
 
 
 @app.get("/version")
@@ -1205,6 +1274,21 @@ def confirm_process(req: ConfirmRequest):
     total_links = len(re.findall(r"\[\[.+?\]\]", content))
 
     output_filename = draft["output_filename"]
+
+    # Create author stubs BEFORE writing the literature note
+    draft_meta = draft.get("meta", {})
+    author_str_d = draft_meta.get("author", "")
+    if author_str_d:
+        work_info = {
+            "title": draft_meta.get("title", ""),
+            "year": draft_meta.get("year", ""),
+            "file": output_filename.replace(".md", ""),
+            "doi": draft_meta.get("doi", ""),
+        }
+        aff = draft_meta.get("affiliation", "")
+        for a in (parse_author_list(author_str_d) or [author_str_d]):
+            update_author_stub(vault_path, a, work_info, aff)
+
     (Path(vault_path) / output_filename).write_text(content, encoding="utf-8")
 
     save_token_cache(vault_path, selected_new)
@@ -1229,15 +1313,6 @@ def confirm_process(req: ConfirmRequest):
     term_types = {t["canonical"]: t.get("type") for t in selected_new}
     found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', content))
     stubs_created, stubs_existing = create_stubs(vault_path, found_links, output_filename, term_types)
-
-    meta = draft.get("meta", {})
-    if meta.get("author"):
-        update_author_stub(vault_path, meta["author"], {
-            "title": meta.get("title", ""),
-            "year": meta.get("year", ""),
-            "file": output_filename.replace(".md", ""),
-            "doi": meta.get("doi", ""),
-        }, meta.get("affiliation", ""))
 
     cost_info = draft.get("cost", {})
     cost_eur = round(
@@ -1478,6 +1553,35 @@ def get_jobs(limit: int = 50):
     except Exception as e:
         logger.warning("Jobs-Lesen fehlgeschlagen: %s", e)
         return {"jobs": [], "count": 0}
+
+
+@app.post("/authors/fix-stubs")
+def fix_author_stubs():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    personen_dir = Path(vault_path) / "Personen"
+    if not personen_dir.is_dir():
+        return {"ok": True, "fixed": 0, "skipped": 0}
+    fixed = 0
+    skipped = 0
+    for md_file in personen_dir.glob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            if "## Werke" in content:
+                skipped += 1
+                continue
+            if "- author" not in content[:400] and "type: person" not in content[:400]:
+                skipped += 1
+                continue
+            name = md_file.stem
+            md_file.write_text(content.rstrip() + _dataview_block(name), encoding="utf-8")
+            fixed += 1
+        except Exception:
+            skipped += 1
+    logger.info("FIX AUTHOR STUBS: %d fixed, %d skipped", fixed, skipped)
+    return {"ok": True, "fixed": fixed, "skipped": skipped}
 
 
 @app.post("/vault/reset")
@@ -1733,6 +1837,8 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
 
     _process_start = datetime.datetime.now()
 
+    pdf_meta_title = ""
+
     if full_text_override is not None:
         full_text = full_text_override.strip()
         if len(full_text) < 50:
@@ -1741,6 +1847,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             pages_text = [extract_page_text_smart(page) for page in doc]
+            pdf_meta_title = _extract_pdf_title(doc)
             doc.close()
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
@@ -1888,8 +1995,10 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     # Fallback: if metadata empty, try regex
     if not any(meta.get(k) for k in ("title", "author", "year")):
         meta = extract_metadata_regex(full_text)
-    # Title fallback: use filename if Claude returned null or empty
-    if not meta.get("title") or meta.get("title") == "null":
+    # Title priority: 1) PDF metadata  2) Claude  3) filename
+    if pdf_meta_title:
+        meta["title"] = pdf_meta_title
+    elif not meta.get("title") or meta.get("title") == "null":
         meta["title"] = re.sub(r'[_\-.]', ' ', Path(filename).stem)[:80].strip()
     logger.info("METADATA: %s (via %s)", {k: v for k, v in meta.items() if k != "citation_chicago"}, meta_model)
 
@@ -1939,11 +2048,8 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     # Frontmatter — Literature-Note format
     author_str = meta.get("author", "")
     authors_list = parse_author_list(author_str)
-    frontmatter = (
-        f"---\ntitle: {meta.get('title', '')}\nauthor: {author_str}\n"
-    )
-    if len(authors_list) > 1:
-        frontmatter += "authors:\n" + "".join(f"  - {a}\n" for a in authors_list)
+    frontmatter = f"---\ntitle: {meta.get('title', '')}\n"
+    frontmatter += format_author_yaml(author_str, authors_list)
     frontmatter += f"year: {meta.get('year', '')}\n"
     for fld in ("journal", "doi"):
         if meta.get(fld):
