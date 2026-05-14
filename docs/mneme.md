@@ -67,14 +67,16 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.6 YAML Citation Fix, 2-Spalten-Extraktion, Prompt-Caching, Timer ✅ 2026-05-14
 - [x] v2.7 Header-Cleanup, Job-Log, Vault Reset, Jobs-Tab ✅ 2026-05-14
 - [x] v2.8 Bugfixes: Titel, Header, Autoren-Links, fix-stubs Endpoint ✅ 2026-05-14
-- [ ] v2.9 Vault Explorer: Token-Liste, Merge-UI
-- [ ] v3.0 Bulk-Verarbeitung (RAW-Data Batch)
+- [x] v2.9 Dataview-Fix, Alias-Konflikt, Kosten-Optimierung ✅ 2026-05-14
+- [ ] v3.0 Vault Explorer: Token-Liste, Merge-UI
+- [ ] v3.1 Bulk-Verarbeitung (RAW-Data Batch)
 - [ ] v3.x Graph-UI, Literatursuche via Claude API
 
 ## Offene Fragen / Bekannte Probleme
 
-- **Speichern-Bug (intermittierend):** Tritt nach Rerun auf, Speichern-Button bleibt ausgegraut. Noch nicht reproduzierbar. Console.log bei v2.8 eingebaut — beim nächsten Auftreten in der Browser-Console nachschauen (`currentDraft`, `btn.disabled`).
+- **Speichern-Bug (intermittierend):** Tritt nach Rerun auf, Speichern-Button bleibt ausgegraut. Möglicherweise identisch mit Alias-Konflikt-Bug (v2.9 gefixt). Nach v2.9 erneut beobachten ob noch auftritt.
 - **tokens.json Skalierung:** Wie gut skaliert bei 100+ Papers? Ab wann wird Lookup langsam?
+- **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks (gebatchte Aufrufe: >5 Batches) noch ungeprüft ob Ollama die größeren Input-Texte korrekt verarbeitet.
 
 ## Stack & Infrastruktur
 

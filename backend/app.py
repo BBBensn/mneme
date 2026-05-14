@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
 OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
 CHUNK_MAX_WORDS_OLLAMA = 800
+OLLAMA_BATCH_SIZE = 3
 TOKENS_FILENAME = "tokens.json"
 HAIKU_PRICE_INPUT_PER_TOKEN = 0.0000008       # $0.80/MTok
 HAIKU_PRICE_OUTPUT_PER_TOKEN = 0.000004       # $4.00/MTok
@@ -406,6 +407,14 @@ def save_token_cache(vault_path: str, terms: list[dict]):
     cache = load_token_cache(vault_path)
     for term in terms:
         canonical = term["canonical"]
+        # If this canonical is already an alias/form of an existing token, merge into it
+        existing_canonical = check_alias_conflict(canonical, cache)
+        if existing_canonical and existing_canonical != canonical:
+            existing = cache[existing_canonical]
+            new_aliases = sorted(set(existing.get("aliases", [])) | {canonical} | set(term.get("aliases", [canonical])))
+            new_forms = sorted(set(existing.get("forms", [])) | {canonical} | set(term.get("aliases", [canonical])))
+            cache[existing_canonical] = {**existing, "aliases": new_aliases, "forms": new_forms}
+            continue
         existing = cache.get(canonical, {"type": None, "aliases": [], "translations": {}, "forms": []})
         new_aliases = sorted(set(existing.get("aliases", [])) | set(term.get("aliases", [canonical])))
         new_translations = {**existing.get("translations", {}), **term.get("translations", {})}
@@ -630,6 +639,18 @@ def get_author_stub_name(author: str) -> str:
     return safe
 
 
+def check_alias_conflict(new_canonical: str, existing_tokens: dict) -> str | None:
+    """Returns existing canonical if new_canonical is already a known alias/form of any token."""
+    nc = new_canonical.lower()
+    for canonical, data in existing_tokens.items():
+        if canonical.lower() == nc:
+            return canonical
+        all_forms = data.get("forms", []) + data.get("aliases", [])
+        if any(f.lower() == nc for f in all_forms):
+            return canonical
+    return None
+
+
 def format_author_yaml(author_str: str, authors_list: list[str]) -> str:
     """Format author YAML with [[wikilinks]] for all authors."""
     if not author_str:
@@ -649,7 +670,7 @@ def _dataview_block(safe_name: str) -> str:
         f"\n## Werke\n\n"
         f"```dataview\n"
         f'TABLE year, journal FROM "/"\n'
-        f'WHERE contains(string(author), "{safe_name}") OR contains(authors, "{safe_name}")\n'
+        f'WHERE author = [[{safe_name}]] OR contains(authors, [[{safe_name}]])\n'
         f"SORT year DESC\n"
         f"```\n"
     )
@@ -1082,7 +1103,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.8.0"
+MNEME_VERSION = "2.9.0"
 
 
 @app.get("/version")
@@ -1569,19 +1590,55 @@ def fix_author_stubs():
     for md_file in personen_dir.glob("*.md"):
         try:
             content = md_file.read_text(encoding="utf-8")
+            name = md_file.stem
             if "## Werke" in content:
-                skipped += 1
+                # Also update old query format (v2.8 → v2.9)
+                old_query = f'WHERE contains(string(author), "{name}") OR contains(authors, "{name}")'
+                new_query = f'WHERE author = [[{name}]] OR contains(authors, [[{name}]])'
+                if old_query in content:
+                    md_file.write_text(content.replace(old_query, new_query), encoding="utf-8")
+                    fixed += 1
+                else:
+                    skipped += 1
                 continue
             if "- author" not in content[:400] and "type: person" not in content[:400]:
                 skipped += 1
                 continue
-            name = md_file.stem
             md_file.write_text(content.rstrip() + _dataview_block(name), encoding="utf-8")
             fixed += 1
         except Exception:
             skipped += 1
     logger.info("FIX AUTHOR STUBS: %d fixed, %d skipped", fixed, skipped)
     return {"ok": True, "fixed": fixed, "skipped": skipped}
+
+
+@app.post("/authors/fix-author-field")
+def fix_author_field():
+    """Fix literature notes: replace double-quoted author wikilinks with single-quoted."""
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    fixed = 0
+    for md_file in Path(vault_path).rglob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            if "literature-note" not in content[:500]:
+                continue
+            # Replace author: "[[...]]" (double quotes) → author: '[[...]]' (single quotes)
+            new_content = re.sub(
+                r'^(author:\s*)"(\[\[.*?\]\])"',
+                r"\1'\2'",
+                content,
+                flags=re.MULTILINE,
+            )
+            if new_content != content:
+                md_file.write_text(new_content, encoding="utf-8")
+                fixed += 1
+        except Exception:
+            pass
+    logger.info("FIX AUTHOR FIELD: %d files fixed", fixed)
+    return {"ok": True, "fixed": fixed}
 
 
 @app.post("/vault/reset")
@@ -1890,6 +1947,13 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         for c, entry in token_cache.items()
     ]
     cached_canonical = set(token_cache.keys())
+    # Build lowercase alias map for alias-conflict detection
+    cached_alias_map: dict[str, str] = {}
+    for c, entry in token_cache.items():
+        cached_alias_map[c.lower()] = c
+        for f in entry.get("forms", []) + entry.get("aliases", []):
+            if f and f.lower() not in cached_alias_map:
+                cached_alias_map[f.lower()] = c
     logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
 
     chunks_count = 0
@@ -1905,13 +1969,17 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         chunks_count = len(p1_chunks)
         _processing_status["chunk_total"] = chunks_count
         all_raw: list[str] = []
-        for i, chunk in enumerate(p1_chunks):
-            _stage(f"Chunk {i + 1}/{chunks_count} — Ollama...", 0.15 + 0.38 * (i / chunks_count))
-            _processing_status["chunk_current"] = i + 1
-            raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(chunk))
+        # Batch chunks (≤3 per Ollama call) to reduce latency
+        batched = [" ".join(p1_chunks[i:i + OLLAMA_BATCH_SIZE])
+                   for i in range(0, chunks_count, OLLAMA_BATCH_SIZE)]
+        n_batches = len(batched)
+        for bi, batch_chunk in enumerate(batched):
+            _stage(f"Batch {bi + 1}/{n_batches} — Ollama...", 0.15 + 0.38 * (bi / max(n_batches, 1)))
+            _processing_status["chunk_current"] = min((bi + 1) * OLLAMA_BATCH_SIZE, chunks_count)
+            raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(batch_chunk))
             terms = parse_terms_simple(raw)
             all_raw.extend(t["canonical"] for t in terms)
-            logger.info("CHUNK %d/%d [Ollama]: %d Begriffe", i + 1, chunks_count, len(terms))
+            logger.info("BATCH %d/%d [Ollama]: %d Begriffe", bi + 1, n_batches, len(terms))
 
         _stage("Claude Quality-Pass (1 Call)...", 0.58)
         unique_raw = list(dict.fromkeys(t for t in all_raw if t not in cached_canonical))
@@ -1944,10 +2012,13 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         chunks_count = len(p1_chunks)
         _processing_status["chunk_total"] = chunks_count
         all_raw = []
-        for i, chunk in enumerate(p1_chunks):
-            _stage(f"Chunk {i + 1}/{chunks_count} — Ollama...", 0.15 + 0.65 * (i / chunks_count))
-            _processing_status["chunk_current"] = i + 1
-            raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(chunk))
+        batched = [" ".join(p1_chunks[i:i + OLLAMA_BATCH_SIZE])
+                   for i in range(0, chunks_count, OLLAMA_BATCH_SIZE)]
+        n_batches = len(batched)
+        for bi, batch_chunk in enumerate(batched):
+            _stage(f"Batch {bi + 1}/{n_batches} — Ollama...", 0.15 + 0.65 * (bi / max(n_batches, 1)))
+            _processing_status["chunk_current"] = min((bi + 1) * OLLAMA_BATCH_SIZE, chunks_count)
+            raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(batch_chunk))
             all_raw.extend(t["canonical"] for t in parse_terms_simple(raw))
         unique_raw = list(dict.fromkeys(t for t in all_raw if t not in cached_canonical))
         raw_list = [{"canonical": t, "aliases": [t]} for t in unique_raw]
@@ -2069,7 +2140,8 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     token_list = [
         {
             "canonical": t["canonical"],
-            "is_new": t["canonical"] not in cached_canonical,
+            "is_new": (t["canonical"] not in cached_canonical
+                       and t["canonical"].lower() not in cached_alias_map),
             "selected": bool(t.get("keep", True)),
             "filtered_reason": None if t.get("keep", True) else "claude_noise",
             "type": t.get("type"),
@@ -2080,11 +2152,16 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         {"canonical": t["canonical"]} for t in claude_tokens if t.get("keep", True)
     ])
     truly_new = sum(1 for t in claude_tokens
-                    if t.get("keep", True) and t["canonical"] not in cached_canonical)
+                    if t.get("keep", True)
+                    and t["canonical"] not in cached_canonical
+                    and t["canonical"].lower() not in cached_alias_map)
     filtered_count = sum(1 for t in claude_tokens if not t.get("keep", True))
 
     logger.info("REVIEW READY: %d kept (%d new), %d filtered | %d links | %s",
                 len(kept_for_preview), truly_new, filtered_count, total_links, output_filename)
+    logger.info("[mneme] Claude calls this run: total=%d | input=%d tokens | cache_read=%d tokens",
+                _last_run_stats["calls"], _last_run_stats["input_tokens"],
+                _last_run_stats.get("cache_read_tokens", 0))
 
     return {
         "vault_path": vault_path,
@@ -2100,6 +2177,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
              "translations": t.get("translations", {})}
             for t in claude_tokens
             if t["canonical"] not in cached_canonical
+            and t["canonical"].lower() not in cached_alias_map
         ],
         "base_links": base_links,
         "vault_links": vault_links,

@@ -819,6 +819,9 @@
         <button class="btn-secondary" id="btn-fix-author-stubs" style="font-size:13px;padding:8px 14px">
           Autoren-Stubs reparieren
         </button>
+        <button class="btn-secondary" id="btn-fix-author-field" style="font-size:13px;padding:8px 14px">
+          Autoren-Felder reparieren
+        </button>
         <button class="btn-danger" id="btn-vault-reset" style="font-size:13px;padding:8px 14px">
           Vault Reset
         </button>
@@ -1002,6 +1005,13 @@
   // Process
   btnProcess.addEventListener('click', async () => {
     if (!selectedFile || processing) return;
+    // Cost cap warning: Claude-only mode with large files can be expensive
+    if (selectedModel === 'claude' && selectedFile.size > 300 * 1024) {
+      const sizeMb = (selectedFile.size / 1024 / 1024).toFixed(1);
+      const estChunks = Math.max(1, Math.round(selectedFile.size / (30 * 1024)));
+      const estCent = (estChunks * 0.2).toFixed(1);
+      if (!confirm(`Dokument ~${sizeMb} MB im Claude-Modus.\nGeschätzte Kosten: ~${estCent}¢ (${estChunks} Chunks).\n\nAuto-Modus wäre ~0.1¢. Fortfahren mit Claude?`)) return;
+    }
     processing = true;
     processStartTime = performance.now();
     btnProcess.disabled = true;
@@ -1346,6 +1356,15 @@
       const r = await fetch(`${API}/tokens/migrate`, { method: 'POST' });
       const data = await r.json();
       showToast(data.message || (data.ok ? 'Migration abgeschlossen' : 'Fehler'));
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
+
+  document.getElementById('btn-fix-author-field').addEventListener('click', async () => {
+    try {
+      const r = await fetch(`${API}/authors/fix-author-field`, { method: 'POST' });
+      const data = await r.json();
+      if (r.ok) showToast(`Autoren-Felder: ${data.fixed} Dateien repariert`);
+      else showToast(`Fehler: ${data.detail || r.statusText}`);
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
