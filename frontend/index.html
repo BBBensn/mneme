@@ -628,6 +628,16 @@
           <button data-model="claude">Claude</button>
         </div>
       </div>
+      <div class="model-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        <div>
+          <div class="model-label">Typ</div>
+          <div class="model-sub" id="type-sub-text">Wissenschaftlicher Artikel</div>
+        </div>
+        <div class="segmented" id="type-toggle">
+          <button data-type="article" class="active">Artikel</button>
+          <button data-type="book">Buch</button>
+        </div>
+      </div>
     </div>
 
     <div id="progress-stage"></div>
@@ -813,6 +823,7 @@
   let reviewAllSelected = true;
   let reviewIsBulk = false;
   let bulkAllPdfsSelected = true;
+  let processingType = 'article';
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -943,6 +954,17 @@
     });
   });
 
+  // Type toggle (Artikel / Buch)
+  document.getElementById('type-toggle').querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('type-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      processingType = btn.dataset.type;
+      document.getElementById('type-sub-text').textContent =
+        processingType === 'book' ? 'Buchkapitel werden einzeln verarbeitet' : 'Wissenschaftlicher Artikel';
+    });
+  });
+
   // Process
   btnProcess.addEventListener('click', async () => {
     if (!selectedFile || processing) return;
@@ -955,7 +977,10 @@
     fd.append('file', selectedFile);
 
     try {
-      const r = await fetch(`${API}/process?model=${selectedModel}`, {
+      const endpoint = processingType === 'book'
+        ? `${API}/process/book?model=${selectedModel}`
+        : `${API}/process?model=${selectedModel}`;
+      const r = await fetch(endpoint, {
         method: 'POST',
         body: fd,
       });
@@ -976,13 +1001,24 @@
         return;
       }
 
-      if (data.status === 'review_ready') {
+      if (data.status === 'book_ready') {
+        const chapCount = data.chapters ? data.chapters.length : 0;
+        const errCount = data.errors ? data.errors.length : 0;
+        setStatus('success',
+          `Buch verarbeitet: <strong>${data.book_title || data.folder}</strong><br>` +
+          `${chapCount} Kapitel in <code>Bücher/${data.folder}/</code>` +
+          (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '')
+        );
+        showToast(`${chapCount} Kapitel gespeichert ✓`);
+        loadVaultTree();
+        resetDrop();
+      } else if (data.status === 'review_ready') {
         currentDraft = data.draft;
         reviewMergedTerms = [];
         reviewIgnoredDups = new Set();
         reviewAllSelected = true;
+        reviewIsBulk = false;
         resetDrop();
-        // bypass showPage confirm since draft was just created
         pageHome.classList.remove('active');
         pageReview.classList.add('active');
         btnHome.style.display = 'flex';

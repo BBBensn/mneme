@@ -499,7 +499,11 @@ def cleanup_existing_stubs(vault_path: str) -> int:
         for md_file in (Path(vault_path) / folder).glob("*.md"):
             try:
                 content = md_file.read_text(encoding="utf-8")
-                if not content.startswith("---\n") or not any(t in content[:300] for t in ("- concept", "- person", "- method")):
+                if not content.startswith("---\n"):
+                    continue
+                if "- author" in content[:300]:  # skip author stubs (Dataview body intentional)
+                    continue
+                if not any(t in content[:300] for t in ("- concept", "- person", "- method")):
                     continue
                 end = content.find("\n---\n", 4)
                 if end == -1:
@@ -559,47 +563,34 @@ def count_backlinks(vault_path: str, term: str) -> int:
     return count
 
 
+def parse_author_list(author_str: str) -> list[str]:
+    if not author_str:
+        return []
+    parts = re.split(r'\s*[&;]\s*|\s+und\s+|\s+and\s+', author_str)
+    return [p.strip() for p in parts if p.strip()]
+
+
 def update_author_stub(vault_path: str, author: str, work: dict, affiliation: str = ""):
-    """Create or update author stub in Personen/ with works list."""
+    """Create author stub with Dataview body. Only creates if not existing."""
     safe_name = re.sub(r'[<>:"/\\|?*\n\r]', '', author.split(",")[0].strip()[:50]).strip()
     if len(safe_name) < 2:
         return
     stub_path = Path(vault_path) / "Personen" / f"{safe_name}.md"
-    today = datetime.date.today().isoformat()
-
-    work_lines = ""
-    if work.get("title"):
-        work_lines += f'  - title: "{work["title"]}"\n'
-    if work.get("year"):
-        work_lines += f'    year: {work["year"]}\n'
-    if work.get("file"):
-        work_lines += f'    file: "[[{work["file"]}]]"\n'
-    if work.get("doi"):
-        work_lines += f'    doi: "{work["doi"]}"\n'
-    if not work_lines:
-        return
-
     if stub_path.exists():
-        content = stub_path.read_text(encoding="utf-8")
-        fm_end = content.find("\n---\n", 4) if content.startswith("---\n") else -1
-        if fm_end == -1:
-            return
-        works_pos = content.find("\nworks:\n")
-        if works_pos != -1 and works_pos < fm_end:
-            insert_pos = works_pos + len("\nworks:\n")
-            content = content[:insert_pos] + work_lines + content[insert_pos:]
-        else:
-            content = content[:fm_end] + f"\nworks:\n{work_lines.rstrip()}" + content[fm_end:]
-        stub_path.write_text(content, encoding="utf-8")
-    else:
-        (Path(vault_path) / "Personen").mkdir(exist_ok=True)
-        aff_line = f'affiliation: "{affiliation}"\n' if affiliation else ""
-        content = (
-            f"---\ntitle: {safe_name}\ntype: person\ntags:\n  - person\n  - author\n"
-            f"{aff_line}works:\n{work_lines}"
-            f"created: {today}\n---\n"
-        )
-        stub_path.write_text(content, encoding="utf-8")
+        return  # Dataview query handles works list dynamically
+    (Path(vault_path) / "Personen").mkdir(exist_ok=True)
+    today = datetime.date.today().isoformat()
+    content = (
+        f"---\ntitle: {safe_name}\ntags:\n  - person\n  - author\ntype: person\n"
+        f"created: {today}\n---\n\n"
+        f"## Werke\n\n"
+        f"```dataview\n"
+        f'TABLE year, journal FROM "/"\n'
+        f'WHERE contains(string(author), "{safe_name}") OR contains(authors, "{safe_name}")\n'
+        f"SORT year DESC\n"
+        f"```\n"
+    )
+    stub_path.write_text(content, encoding="utf-8")
 
 
 def build_combined_prompt(term_list: list[str], context_text: str) -> str:
@@ -621,10 +612,17 @@ def build_combined_prompt(term_list: list[str], context_text: str) -> str:
         "     Titel steht meist auf Seite 1, vor dem Autorennamen, kürzer als 15 Wörter.\n"
         "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
         "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
-        "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n\n"
+        "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n"
+        "8. SECTIONS: Analysiere die Textstruktur:\n"
+        "   - has_abstract: true wenn Text einen Abstract-Abschnitt HAT (nicht erfinden!)\n"
+        "   - abstract_text: den Abstract-Text (max 400 Wörter) oder null\n"
+        "   - has_bibliography: true wenn Text eine Literaturliste HAT (nicht erfinden!)\n"
+        "   - bibliography_start: genaue Überschrift ('Literatur', 'References' etc.) oder null\n\n"
         "Antworte NUR mit folgendem JSON (kein anderer Text, keine Markdown-Blöcke):\n"
         '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", '
         '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "..."},\n'
+        ' "sections": {"has_abstract": true, "abstract_text": "...", '
+        '"has_bibliography": true, "bibliography_start": "Literatur"},\n'
         ' "tokens": [\n'
         '   {"term": "Max Imdahl", "type": "person", "aliases": ["Imdahl"], '
         '"de": "Max Imdahl", "en": "Max Imdahl", "keep": true},\n'
@@ -656,6 +654,13 @@ def parse_combined_response(raw: str) -> tuple[dict, list[dict]]:
             "affiliation": str(md.get("affiliation") or ""),
             "citation_apa": str(md.get("citation_apa") or ""),
             "citation_chicago": str(md.get("citation_chicago") or ""),
+        }
+        sec = data.get("sections", {}) or {}
+        metadata["sections"] = {
+            "has_abstract": bool(sec.get("has_abstract", False)),
+            "abstract_text": str(sec.get("abstract_text") or ""),
+            "has_bibliography": bool(sec.get("has_bibliography", False)),
+            "bibliography_start": str(sec.get("bibliography_start") or ""),
         }
         tokens = []
         for t in data.get("tokens", []):
@@ -718,6 +723,53 @@ def structure_text_sections(full_text: str) -> tuple[str, str, str]:
 
 _CLAUDE_TYPE_TO_FOLDER = {"person": "Personen", "method": "Methoden", "concept": "Konzepte"}
 _CLAUDE_TYPE_TO_TAG = {"person": "person", "method": "method", "concept": "concept"}
+
+
+def build_chapter_prompt(toc_text: str) -> str:
+    return (
+        "Analysiere das folgende Inhaltsverzeichnis eines Buches.\n"
+        "Extrahiere nur die Hauptkapitel (keine Unterkapitel, keine Anhänge).\n"
+        "Antworte NUR mit JSON-Array (kein anderer Text):\n"
+        '[{"chapter": 1, "title": "Einleitung", "page_start": 15}, ...]\n'
+        "page_start = gedruckte Seitenzahl wo das Kapitel beginnt.\n"
+        "Wenn kein Inhaltsverzeichnis erkennbar: []\n\n"
+        f"Text:\n{toc_text[:4000]}"
+    )
+
+
+def parse_chapter_structure(raw: str) -> list[dict]:
+    try:
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not m:
+            return []
+        chapters = json.loads(m.group())
+        return [c for c in chapters if isinstance(c, dict) and "title" in c and c.get("title")]
+    except Exception:
+        return []
+
+
+def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
+    """Find actual PDF page indices by searching for chapter titles in page text."""
+    result = []
+    for ch in chapters:
+        title_words = ch.get("title", "").split()[:3]
+        found_page = None
+        if title_words:
+            pattern = re.compile(re.escape(' '.join(title_words)), re.IGNORECASE)
+            for page_idx in range(len(doc)):
+                if pattern.search(doc[page_idx].get_text()):
+                    found_page = page_idx
+                    break
+        if found_page is None:
+            found_page = max(0, ch.get("page_start", 1) - 1)
+        result.append({**ch, "pdf_page": found_page})
+    return result
+
+
+def derive_chapter_filename(chapter_num: int, chapter_title: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()[:40]
+    safe = re.sub(r'\s+', '-', safe)
+    return f"{chapter_num:02d}-{safe}.md"
 
 
 def _noise_reason(term: str) -> str | None:
@@ -849,7 +901,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.4.0"
+MNEME_VERSION = "2.5.0"
 
 
 @app.get("/version")
@@ -1092,6 +1144,162 @@ def quality_pass(req: QualityPassRequest):
         logger.warning("Quality pass fehlgeschlagen: %s", e)
         raise HTTPException(status_code=500, detail=f"quality_pass_error: {e}")
     return {"remove": [str(r) for r in remove]}
+
+
+@app.post("/process/book")
+async def process_book(file: UploadFile = File(...), model: str = "auto"):
+    global _processing_status
+    _processing_status = {"active": True, "stage": "Buch wird geladen...", "progress": 0.02,
+                          "chunk_current": 0, "chunk_total": 0}
+    try:
+        return await _process_book_inner(file, model)
+    finally:
+        _processing_status["active"] = False
+        _processing_status["stage"] = ""
+
+
+async def _process_book_inner(file: UploadFile, model: str) -> dict:
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="empty_file")
+
+    api_key = get_anthropic_key(cfg)
+    if not api_key.strip():
+        raise HTTPException(status_code=400, detail="claude_api_key_missing")
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
+
+    # Phase 0: Chapter detection from first 15 pages
+    _processing_status["stage"] = "Kapitelstruktur wird erkannt..."
+    _processing_status["progress"] = 0.04
+    toc_text = "\n\n".join(doc[p].get_text() for p in range(min(15, len(doc))))
+    try:
+        chapters = parse_chapter_structure(call_claude(api_key, build_chapter_prompt(toc_text), max_tokens=1024))
+    except Exception as e:
+        logger.warning("Kapitel-Extraktion fehlgeschlagen: %s", e)
+        chapters = []
+
+    if not chapters:
+        doc.close()
+        draft = await _process_pdf_bytes(pdf_bytes, file.filename or "book.pdf", model)
+        global _pending_draft
+        _pending_draft = draft
+        return {"status": "review_ready", "draft": {
+            "filename": draft["output_filename"], "content": draft["preview_content"],
+            "tokens": draft["token_list"], "duplicate_suggestions": draft["duplicate_suggestions"],
+            "stats": draft["stats"], "cost": draft["cost"],
+        }}
+
+    chapters_with_pages = find_chapter_boundaries(doc, chapters)
+    n = len(chapters_with_pages)
+    _processing_status["chunk_total"] = n
+
+    # Book-level metadata from first 5 pages
+    _processing_status["stage"] = "Buch-Metadaten werden extrahiert..."
+    _processing_status["progress"] = 0.07
+    intro_text = "\n\n".join(doc[p].get_text() for p in range(min(5, len(doc))))
+    try:
+        book_meta = parse_metadata(call_claude(api_key, build_metadata_prompt(intro_text), max_tokens=256))
+    except Exception:
+        book_meta = extract_metadata_regex(intro_text)
+    if not book_meta.get("title"):
+        book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(file.filename or "book").stem)[:80].strip()
+
+    folder_name = derive_output_filename(book_meta, file.filename or "book.pdf").replace(".md", "")
+    book_dir = Path(vault_path) / "Bücher" / folder_name
+    book_dir.mkdir(parents=True, exist_ok=True)
+
+    processed_chapters: list[dict] = []
+    errors: list[dict] = []
+
+    for i, chapter in enumerate(chapters_with_pages):
+        chapter_num = chapter.get("chapter", i + 1)
+        chapter_title = chapter.get("title", f"Kapitel {chapter_num}")
+        pdf_start = chapter.get("pdf_page", 0)
+        pdf_end = (chapters_with_pages[i + 1].get("pdf_page", len(doc))
+                   if i + 1 < n else len(doc))
+        chapter_text = "\n\n".join(
+            doc[p].get_text() for p in range(pdf_start, min(pdf_end, len(doc)))
+        ).strip()
+        if len(chapter_text) < 80:
+            continue
+
+        _processing_status["stage"] = f"Kapitel {chapter_num}/{n}: {chapter_title[:35]}"
+        _processing_status["progress"] = 0.10 + 0.82 * (i / n)
+        _processing_status["chunk_current"] = chapter_num
+
+        chapter_filename = derive_chapter_filename(chapter_num, chapter_title)
+        try:
+            draft = await _process_pdf_bytes(
+                None, chapter_filename, model,
+                stage_prefix=f"[{chapter_num}/{n}] ",
+                full_text_override=chapter_text,
+            )
+            overview_link = f"Bücher/{folder_name}/00-Uebersicht"
+            book_title_safe = book_meta.get("title", "").replace('"', "'")
+            chapter_frontmatter = (
+                f"---\ntitle: {chapter_title}\nchapter: {chapter_num}\n"
+                f'book: "[[{overview_link}|{book_title_safe}]]"\n'
+                f"tags:\n  - book-chapter\n"
+                f"source_pdf: {file.filename or 'book.pdf'}\n"
+                f"mneme_version: {MNEME_VERSION}\n---\n\n"
+                f"> Teil von [[{overview_link}|{book_title_safe}]]\n\n"
+            )
+            final_terms = merge_terms(
+                [draft["cached_terms"], draft["new_terms"]],
+                draft["base_links"], draft["vault_links"], draft["full_text"],
+            )
+            chapter_body = apply_wikilinks(draft["sections_text"], final_terms)
+            (book_dir / chapter_filename).write_text(chapter_frontmatter + chapter_body, encoding="utf-8")
+            save_token_cache(vault_path, draft["new_terms"])
+            found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', chapter_body))
+            term_types = {t["canonical"]: t.get("type") for t in draft["new_terms"]}
+            create_stubs(vault_path, found_links, chapter_filename, term_types)
+            processed_chapters.append({"chapter": chapter_num, "title": chapter_title,
+                                        "filename": chapter_filename})
+        except Exception as e:
+            logger.warning("Kapitel %d fehlgeschlagen: %s", chapter_num, e)
+            errors.append({"chapter": chapter_num, "title": chapter_title, "error": str(e)})
+
+    doc.close()
+
+    # Overview file
+    _processing_status["stage"] = "Übersicht wird erstellt..."
+    _processing_status["progress"] = 0.96
+    author_str = book_meta.get("author", "")
+    authors_list = parse_author_list(author_str)
+    authors_yaml = "authors:\n" + "".join(f"  - {a}\n" for a in authors_list) if authors_list else ""
+    overview_content = (
+        f"---\ntitle: {book_meta.get('title', '')}\nauthor: {author_str}\n"
+        f"{authors_yaml}year: {book_meta.get('year', '')}\ntype: book\n"
+        f"tags:\n  - book-note\nsource_pdf: {file.filename or 'book.pdf'}\n"
+        f"mneme_version: {MNEME_VERSION}\n---\n\n"
+        f"## Inhalt\n\n"
+        f"```dataview\n"
+        f'LIST FROM "Bücher/{folder_name}"\n'
+        f'WHERE file.name != "00-Uebersicht"\n'
+        f"SORT file.name ASC\n"
+        f"```\n"
+    )
+    (book_dir / "00-Uebersicht.md").write_text(overview_content, encoding="utf-8")
+    logger.info("BUCH FERTIG: %d Kapitel | %d Fehler | %s", len(processed_chapters), len(errors), folder_name)
+
+    return {
+        "status": "book_ready",
+        "overview": f"Bücher/{folder_name}/00-Uebersicht.md",
+        "folder": folder_name,
+        "book_title": book_meta.get("title", ""),
+        "chapters": processed_chapters,
+        "errors": errors,
+    }
 
 
 @app.get("/authors")
@@ -1338,26 +1546,31 @@ async def _process_pdf_inner(file: UploadFile, model: str):
     }
 
 
-async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
-                              stage_prefix: str = "") -> dict:
+async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
+                              stage_prefix: str = "",
+                              full_text_override: str | None = None) -> dict:
     """Core processing. Returns a complete draft dict ready for review or bulk confirm."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
     if not vault_path or not Path(vault_path).is_dir():
         raise HTTPException(status_code=400, detail="vault_path_not_set")
-    if not pdf_bytes:
+
+    if full_text_override is not None:
+        full_text = full_text_override.strip()
+        if len(full_text) < 50:
+            raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
+    elif pdf_bytes:
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            pages_text = [page.get_text() for page in doc]
+            doc.close()
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
+        full_text = "\n\n".join(pages_text).strip()
+        if len(full_text) < 100:
+            raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
+    else:
         raise HTTPException(status_code=400, detail="empty_file")
-
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        pages_text = [page.get_text() for page in doc]
-        doc.close()
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
-
-    full_text = "\n\n".join(pages_text).strip()
-    if len(full_text) < 100:
-        raise HTTPException(status_code=422, detail="scanned_pdf_or_empty")
 
     def _stage(s: str, p: float):
         _processing_status["stage"] = f"{stage_prefix}{s}"
@@ -1505,16 +1718,46 @@ async def _process_pdf_bytes(pdf_bytes: bytes, filename: str, model: str,
     ]
     preview_terms = merge_terms([cached_terms, kept_for_preview], base_links, vault_links, full_text)
 
-    abstract, main_body, references = structure_text_sections(full_text)
-    sections_text = f"## Abstract\n\n{abstract}\n\n## Volltext\n\n{main_body}"
-    if references:
-        sections_text += f"\n\n## Literatur\n\n{references}"
+    # Sections: use Claude's analysis if available, else heuristic
+    sections_info = meta.get("sections", {})
+    abstract_h, main_body_h, references_h = structure_text_sections(full_text)
 
+    if sections_info.get("has_abstract") is False:
+        abstract = ""
+    elif sections_info.get("abstract_text"):
+        abstract = sections_info["abstract_text"]
+    else:
+        abstract = abstract_h
+
+    if sections_info.get("has_bibliography") is False:
+        references = ""
+    elif sections_info.get("bibliography_start"):
+        kw = re.escape(sections_info["bibliography_start"])
+        bib_m = re.search(r'\n' + kw + r'\s*\n', full_text, re.IGNORECASE)
+        references = full_text[bib_m.start():].strip() if bib_m else references_h
+    else:
+        references = references_h
+
+    main_body = main_body_h
+
+    sections_parts = []
+    if abstract:
+        sections_parts.append(f"## Abstract\n\n{abstract}")
+    sections_parts.append(f"## Volltext\n\n{main_body}")
+    if references:
+        sections_parts.append(f"## Literatur\n\n{references}")
+    sections_text = "\n\n".join(sections_parts)
+
+    # Frontmatter — Literature-Note format
+    author_str = meta.get("author", "")
+    authors_list = parse_author_list(author_str)
     frontmatter = (
-        f"---\ntitle: {meta.get('title', '')}\nauthor: {meta.get('author', '')}\n"
-        f"year: {meta.get('year', '')}\n"
+        f"---\ntitle: {meta.get('title', '')}\nauthor: {author_str}\n"
     )
-    for fld in ("journal", "doi", "affiliation"):
+    if len(authors_list) > 1:
+        frontmatter += "authors:\n" + "".join(f"  - {a}\n" for a in authors_list)
+    frontmatter += f"year: {meta.get('year', '')}\n"
+    for fld in ("journal", "doi"):
         if meta.get(fld):
             frontmatter += f"{fld}: {meta[fld]}\n"
     if meta.get("citation_apa"):
