@@ -773,6 +773,7 @@
 
     <div id="review-citation" style="display:none;font-size:12px;color:var(--text2);padding:10px 14px;background:var(--surface2);border-radius:var(--radius-sm);word-break:break-all;line-height:1.6"></div>
     <div id="review-cost-info" style="font-size:12px;color:var(--text2);text-align:right;padding:0 4px"></div>
+    <div id="review-elapsed" style="display:none;font-size:12px;color:var(--text2);text-align:right;padding:0 4px"></div>
 
     <div class="review-actions">
       <button class="btn-secondary" id="btn-quality-pass" style="white-space:nowrap">Nochmal mit Claude</button>
@@ -817,6 +818,7 @@
   let selectedModel = 'auto';
   let processing = false;
   let pollTimer = null;
+  let processStartTime = null;
   let currentDraft = null;
   let reviewMergedTerms = [];
   let reviewIgnoredDups = new Set();
@@ -969,6 +971,7 @@
   btnProcess.addEventListener('click', async () => {
     if (!selectedFile || processing) return;
     processing = true;
+    processStartTime = performance.now();
     btnProcess.disabled = true;
     showProgress();
     clearStatus();
@@ -1421,12 +1424,26 @@
 
     const c = d.cost;
     if (c && (c.input_tokens > 0 || c.phase1_model === 'ollama')) {
-      const eurCents = ((c.input_tokens * 0.0000008 + c.output_tokens * 0.000004) * 0.92 * 100).toFixed(3);
-      const costStr = c.phase1_model === 'ollama'
-        ? `~0.00¢ (Ollama)${c.input_tokens > 0 ? ` + ~${eurCents}¢ (Claude Meta)` : ''}`
-        : `~${eurCents}¢`;
+      const costEur = ((c.input_tokens * 0.0000008 + c.output_tokens * 0.000004) * 0.92 * 100).toFixed(3);
+      let costStr;
+      if (c.phase1_model === 'ollama') {
+        costStr = `~0.00¢ (Ollama)${c.input_tokens > 0 ? ` + ~${costEur}¢ (Claude)` : ''}`;
+      } else {
+        costStr = `~${costEur}¢`;
+      }
+      if (c.cache_read_tokens > 0) {
+        const savedCents = ((c.cache_read_tokens || 0) * (0.0000008 - 0.000000080) * 0.92 * 100).toFixed(3);
+        costStr += ` (Cache: ${savedCents}¢ gespart)`;
+      }
       document.getElementById('review-cost-info').textContent =
         `${s.model_used} · ${s.chunks} Chunks · ${costStr}`;
+    }
+    if (processStartTime !== null) {
+      const elapsed = ((performance.now() - processStartTime) / 1000).toFixed(1);
+      const elapsedEl = document.getElementById('review-elapsed');
+      elapsedEl.textContent = `Verarbeitungszeit: ${elapsed}s`;
+      elapsedEl.style.display = 'block';
+      processStartTime = null;
     }
     const citEl = document.getElementById('review-citation');
     if (s.citation_apa) {
@@ -1534,6 +1551,8 @@
         currentDraft = null;
         reviewMergedTerms = [];
         reviewIsBulk = false;
+        processStartTime = null;
+        document.getElementById('review-elapsed').style.display = 'none';
         pageReview.classList.remove('active');
         pageHome.classList.add('active');
         btnHome.style.display = 'none';

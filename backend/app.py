@@ -47,12 +47,17 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 CHUNK_MAX_WORDS = 2000
 CHUNK_MAX_WORDS_OLLAMA = 800
 TOKENS_FILENAME = "tokens.json"
-HAIKU_PRICE_INPUT_PER_TOKEN = 0.0000008    # USD/token  ($0.80/MTok)
-HAIKU_PRICE_OUTPUT_PER_TOKEN = 0.000004    # USD/token  ($4.00/MTok)
+HAIKU_PRICE_INPUT_PER_TOKEN = 0.0000008       # $0.80/MTok
+HAIKU_PRICE_OUTPUT_PER_TOKEN = 0.000004       # $4.00/MTok
+HAIKU_PRICE_CACHE_WRITE_PER_TOKEN = 0.000001  # $1.00/MTok
+HAIKU_PRICE_CACHE_READ_PER_TOKEN = 0.000000080  # $0.08/MTok
 EUR_RATE = 0.92
 
-_last_run_stats: dict = {"input_tokens": 0, "output_tokens": 0, "calls": 0,
-                         "phase1_model": "", "meta_model": ""}
+_last_run_stats: dict = {
+    "input_tokens": 0, "output_tokens": 0, "calls": 0,
+    "cache_read_tokens": 0, "cache_creation_tokens": 0,
+    "phase1_model": "", "meta_model": "",
+}
 _processing_status: dict = {"active": False, "stage": "", "progress": 0.0,
                              "chunk_current": 0, "chunk_total": 0}
 _pending_draft: dict | None = None
@@ -152,6 +157,52 @@ def call_claude(api_key: str, prompt: str, max_tokens: int = 8192) -> str:
     _last_run_stats["output_tokens"] += message.usage.output_tokens
     _last_run_stats["calls"] += 1
     return message.content[0].text
+
+
+def call_claude_with_cache(api_key: str, system_text: str, user_blocks: list[dict],
+                            max_tokens: int = 4096) -> str:
+    """Call Claude with prompt caching on the system prompt."""
+    global _last_run_stats
+    client = anthropic.Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_blocks}],
+    )
+    _last_run_stats["input_tokens"] += message.usage.input_tokens
+    _last_run_stats["output_tokens"] += message.usage.output_tokens
+    _last_run_stats["calls"] += 1
+    _last_run_stats["cache_read_tokens"] += getattr(message.usage, "cache_read_input_tokens", 0) or 0
+    _last_run_stats["cache_creation_tokens"] += getattr(message.usage, "cache_creation_input_tokens", 0) or 0
+    return message.content[0].text
+
+
+def yaml_str(s: str) -> str:
+    """YAML single-quoted string — safe for citations with commas, quotes, colons."""
+    if not s:
+        return "''"
+    return "'" + s.replace("'", "''") + "'"
+
+
+def extract_page_text_smart(page) -> str:
+    """Extract page text, handling two-column layouts via block position sorting."""
+    blocks = page.get_text("blocks")
+    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
+    if len(text_blocks) < 4:
+        return page.get_text()
+    mid_x = page.rect.width / 2
+    left = sorted([b for b in text_blocks if b[0] < mid_x], key=lambda b: b[1])
+    right = sorted([b for b in text_blocks if b[0] >= mid_x], key=lambda b: b[1])
+    if len(left) < 2 or len(right) < 2:
+        return page.get_text()
+    # Sanity: both columns should span similar y-range
+    y_overlap = min(left[-1][3], right[-1][3]) - max(left[0][1], right[0][1])
+    if y_overlap < page.rect.height * 0.25:
+        return page.get_text()
+    left_text = " ".join(b[4].replace("\n", " ") for b in left)
+    right_text = " ".join(b[4].replace("\n", " ") for b in right)
+    return left_text + " " + right_text
 
 
 def build_metadata_prompt(text: str) -> str:
@@ -593,47 +644,52 @@ def update_author_stub(vault_path: str, author: str, work: dict, affiliation: st
     stub_path.write_text(content, encoding="utf-8")
 
 
-def build_combined_prompt(term_list: list[str], context_text: str) -> str:
+_COMBINED_SYSTEM_PROMPT = (
+    "Du analysierst einen wissenschaftlichen Text.\n\n"
+    "Deine Aufgaben:\n"
+    "1. BEREINIGUNG: Entferne Noise (URLs, Impressum, Abbildungsreferenzen, generische Wörter ohne Fachbezug)\n"
+    "2. NORMALISIERUNG: Fasse zusammen was zusammengehört (Imdahl + Max Imdahl → Max Imdahl)\n"
+    "3. ERGÄNZUNG: Füge wichtige Begriffe hinzu die im Text stehen aber fehlen\n"
+    "4. KLASSIFIZIERUNG: Markiere jeden Begriff als person / concept / method (oder null)\n"
+    "5. ÜBERSETZUNG: Gib für jeden Begriff die deutsche (de) und englische (en) Form an\n"
+    "6. METADATEN:\n"
+    "   - title: NUR der eigentliche Werktitel. NICHT der erste Satz des Abstracts.\n"
+    "     Titel steht meist auf Seite 1, vor dem Autorennamen, kürzer als 15 Wörter.\n"
+    "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
+    "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
+    "   - citation_apa und citation_chicago: OHNE äußere Anführungszeichen, reiner Textstring\n"
+    "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n"
+    "8. SECTIONS: Analysiere die Textstruktur:\n"
+    "   - has_abstract: true wenn Text einen Abstract-Abschnitt HAT (nicht erfinden!)\n"
+    "   - abstract_text: den Abstract-Text (max 400 Wörter) oder null\n"
+    "   - has_bibliography: true wenn Text eine Literaturliste HAT (nicht erfinden!)\n"
+    "   - bibliography_start: genaue Überschrift ('Literatur', 'References' etc.) oder null\n\n"
+    "Antworte NUR mit folgendem JSON (kein anderer Text, keine Markdown-Blöcke):\n"
+    '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", '
+    '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "..."},\n'
+    ' "sections": {"has_abstract": true, "abstract_text": "...", '
+    '"has_bibliography": true, "bibliography_start": "Literatur"},\n'
+    ' "tokens": [\n'
+    '   {"term": "Max Imdahl", "type": "person", "aliases": ["Imdahl"], '
+    '"de": "Max Imdahl", "en": "Max Imdahl", "keep": true},\n'
+    '   {"term": "Lernen", "type": "concept", "aliases": ["Lernens"], '
+    '"de": "Lernen", "en": "Learning", "keep": true},\n'
+    '   {"term": "www.verlag.de", "type": null, "aliases": [], "de": "", "en": "", "keep": false}\n'
+    " ]}\n"
+    "keep: true = sinnvoller Wikilink-Begriff | keep: false = Noise"
+)
+
+
+def build_combined_user_blocks(term_list: list[str], context_text: str) -> list[dict]:
     terms_section = (
         "Begriffe von Ollama (roh, unbereinigt):\n" + "\n".join(f"- {t}" for t in term_list)
         if term_list
         else "Keine Vorab-Begriffe — erkenne selbst alle relevanten Begriffe aus dem Text."
     )
-    return (
-        "Du analysierst einen wissenschaftlichen Text.\n\n"
-        "Deine Aufgaben:\n"
-        "1. BEREINIGUNG: Entferne Noise (URLs, Impressum, Abbildungsreferenzen, generische Wörter ohne Fachbezug)\n"
-        "2. NORMALISIERUNG: Fasse zusammen was zusammengehört (Imdahl + Max Imdahl → Max Imdahl)\n"
-        "3. ERGÄNZUNG: Füge wichtige Begriffe hinzu die im Text stehen aber fehlen\n"
-        "4. KLASSIFIZIERUNG: Markiere jeden Begriff als person / concept / method (oder null)\n"
-        "5. ÜBERSETZUNG: Gib für jeden Begriff die deutsche (de) und englische (en) Form an\n"
-        "6. METADATEN:\n"
-        "   - title: NUR der eigentliche Werktitel. NICHT der erste Satz des Abstracts.\n"
-        "     Titel steht meist auf Seite 1, vor dem Autorennamen, kürzer als 15 Wörter.\n"
-        "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
-        "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
-        "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n"
-        "8. SECTIONS: Analysiere die Textstruktur:\n"
-        "   - has_abstract: true wenn Text einen Abstract-Abschnitt HAT (nicht erfinden!)\n"
-        "   - abstract_text: den Abstract-Text (max 400 Wörter) oder null\n"
-        "   - has_bibliography: true wenn Text eine Literaturliste HAT (nicht erfinden!)\n"
-        "   - bibliography_start: genaue Überschrift ('Literatur', 'References' etc.) oder null\n\n"
-        "Antworte NUR mit folgendem JSON (kein anderer Text, keine Markdown-Blöcke):\n"
-        '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", '
-        '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "..."},\n'
-        ' "sections": {"has_abstract": true, "abstract_text": "...", '
-        '"has_bibliography": true, "bibliography_start": "Literatur"},\n'
-        ' "tokens": [\n'
-        '   {"term": "Max Imdahl", "type": "person", "aliases": ["Imdahl"], '
-        '"de": "Max Imdahl", "en": "Max Imdahl", "keep": true},\n'
-        '   {"term": "Lernen", "type": "concept", "aliases": ["Lernens"], '
-        '"de": "Lernen", "en": "Learning", "keep": true},\n'
-        '   {"term": "www.verlag.de", "type": null, "aliases": [], "de": "", "en": "", "keep": false}\n'
-        " ]}\n\n"
-        "keep: true = sinnvoller Wikilink-Begriff | keep: false = Noise\n\n"
-        f"{terms_section}\n\n"
-        f"Text (Kontext, erste 3000 Zeichen):\n{context_text}"
-    )
+    return [
+        {"type": "text", "text": terms_section, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": f"\nText (Kontext, erste 3000 Zeichen):\n{context_text}"},
+    ]
 
 
 def parse_combined_response(raw: str) -> tuple[dict, list[dict]]:
@@ -901,7 +957,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.5.0"
+MNEME_VERSION = "2.6.0"
 
 
 @app.get("/version")
@@ -913,13 +969,24 @@ def get_version():
 def last_run_cost():
     inp = _last_run_stats["input_tokens"]
     out = _last_run_stats["output_tokens"]
-    cost_usd = inp * HAIKU_PRICE_INPUT_PER_TOKEN + out * HAIKU_PRICE_OUTPUT_PER_TOKEN
+    cache_read = _last_run_stats.get("cache_read_tokens", 0)
+    cache_write = _last_run_stats.get("cache_creation_tokens", 0)
+    cost_usd = (
+        inp * HAIKU_PRICE_INPUT_PER_TOKEN +
+        out * HAIKU_PRICE_OUTPUT_PER_TOKEN +
+        cache_read * HAIKU_PRICE_CACHE_READ_PER_TOKEN +
+        cache_write * HAIKU_PRICE_CACHE_WRITE_PER_TOKEN
+    )
     cost_eur = cost_usd * EUR_RATE
+    saved_usd = cache_read * (HAIKU_PRICE_INPUT_PER_TOKEN - HAIKU_PRICE_CACHE_READ_PER_TOKEN)
     return {
         "input_tokens": inp,
         "output_tokens": out,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_write,
         "cost_usd": round(cost_usd, 5),
         "cost_eur": round(cost_eur, 5),
+        "saved_eur": round(saved_usd * EUR_RATE, 5),
         "calls": _last_run_stats["calls"],
         "phase1_model": _last_run_stats.get("phase1_model", ""),
         "meta_model": _last_run_stats.get("meta_model", ""),
@@ -1562,7 +1629,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     elif pdf_bytes:
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            pages_text = [page.get_text() for page in doc]
+            pages_text = [extract_page_text_smart(page) for page in doc]
             doc.close()
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
@@ -1591,8 +1658,11 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     if phase1_model == "claude" and not api_key.strip():
         raise HTTPException(status_code=400, detail="claude_api_key_missing")
 
-    _last_run_stats.update({"input_tokens": 0, "output_tokens": 0, "calls": 0,
-                            "phase1_model": phase1_model, "meta_model": meta_model})
+    _last_run_stats.update({
+        "input_tokens": 0, "output_tokens": 0, "calls": 0,
+        "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        "phase1_model": phase1_model, "meta_model": meta_model,
+    })
     logger.info("PHASE1: %s | META: %s | FILE: %s", phase1_model, meta_model, filename)
 
     # Phase 0: Token-Cache
@@ -1628,8 +1698,11 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         _stage("Claude Quality-Pass (1 Call)...", 0.58)
         unique_raw = list(dict.fromkeys(t for t in all_raw if t not in cached_canonical))
         try:
-            combined_raw = call_claude(api_key, build_combined_prompt(unique_raw, full_text[:3000]),
-                                       max_tokens=4096)
+            combined_raw = call_claude_with_cache(
+                api_key, _COMBINED_SYSTEM_PROMPT,
+                build_combined_user_blocks(unique_raw, full_text[:3000]),
+                max_tokens=4096,
+            )
             meta, claude_tokens = parse_combined_response(combined_raw)
         except Exception as e:
             logger.warning("Combined Claude call fehlgeschlagen (%s), Fallback", e)
@@ -1743,7 +1816,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     sections_parts = []
     if abstract:
         sections_parts.append(f"## Abstract\n\n{abstract}")
-    sections_parts.append(f"## Volltext\n\n{main_body}")
+    sections_parts.append(f"## Volltext\n\n{full_text}")  # always full document text
     if references:
         sections_parts.append(f"## Literatur\n\n{references}")
     sections_text = "\n\n".join(sections_parts)
@@ -1761,9 +1834,9 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         if meta.get(fld):
             frontmatter += f"{fld}: {meta[fld]}\n"
     if meta.get("citation_apa"):
-        frontmatter += f'citation_apa: "{meta["citation_apa"]}"\n'
+        frontmatter += f"citation_apa: {yaml_str(meta['citation_apa'])}\n"
     if meta.get("citation_chicago"):
-        frontmatter += f'citation_chicago: "{meta["citation_chicago"]}"\n'
+        frontmatter += f"citation_chicago: {yaml_str(meta['citation_chicago'])}\n"
     frontmatter += f"tags:\n  - literature-note\nsource_pdf: {filename}\nmneme_version: {MNEME_VERSION}\n---\n\n"
 
     preview_content = apply_wikilinks(frontmatter + sections_text, preview_terms)
