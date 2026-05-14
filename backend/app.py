@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import textwrap
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
+JOBS_PATH = Path(__file__).parent / "mneme_jobs.jsonl"
 
 DEFAULT_CONFIG = {
     "vault_path": "",
@@ -658,6 +660,9 @@ _COMBINED_SYSTEM_PROMPT = (
     "     Wenn kein sicherer Titel erkennbar → null zurückgeben.\n"
     "   - author, year, journal, doi, affiliation (Institution des Erstautors)\n"
     "   - citation_apa und citation_chicago: OHNE äußere Anführungszeichen, reiner Textstring\n"
+    "   - body_start_marker: erste ~20 Wörter des echten Fließtexts (NICHT Titel/Abstract/Keywords/Instituts-/DOI-Block).\n"
+    "     Der Fließtext beginnt typisch nach Abstract und Keywords mit dem ersten Einleitungssatz.\n"
+    "     Gib den exakten Wortlaut zurück. null wenn unklar.\n"
     "7. ZITATION: Generiere aus den Metadaten korrekte APA und Chicago Strings\n"
     "8. SECTIONS: Analysiere die Textstruktur:\n"
     "   - has_abstract: true wenn Text einen Abstract-Abschnitt HAT (nicht erfinden!)\n"
@@ -666,7 +671,8 @@ _COMBINED_SYSTEM_PROMPT = (
     "   - bibliography_start: genaue Überschrift ('Literatur', 'References' etc.) oder null\n\n"
     "Antworte NUR mit folgendem JSON (kein anderer Text, keine Markdown-Blöcke):\n"
     '{"metadata": {"title": "...", "author": "...", "year": "...", "journal": "", '
-    '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "..."},\n'
+    '"doi": "", "affiliation": "", "citation_apa": "...", "citation_chicago": "...", '
+    '"body_start_marker": "Erster Satz des echten Fließtexts..."},\n'
     ' "sections": {"has_abstract": true, "abstract_text": "...", '
     '"has_bibliography": true, "bibliography_start": "Literatur"},\n'
     ' "tokens": [\n'
@@ -710,6 +716,7 @@ def parse_combined_response(raw: str) -> tuple[dict, list[dict]]:
             "affiliation": str(md.get("affiliation") or ""),
             "citation_apa": str(md.get("citation_apa") or ""),
             "citation_chicago": str(md.get("citation_chicago") or ""),
+            "body_start_marker": str(md.get("body_start_marker") or ""),
         }
         sec = data.get("sections", {}) or {}
         metadata["sections"] = {
@@ -826,6 +833,55 @@ def derive_chapter_filename(chapter_num: int, chapter_title: str) -> str:
     safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()[:40]
     safe = re.sub(r'\s+', '-', safe)
     return f"{chapter_num:02d}-{safe}.md"
+
+
+_HEADER_LINE_PATTERNS = [
+    re.compile(r'^\s*ISSN\s*[\d\-:]', re.IGNORECASE),
+    re.compile(r'^\s*DOI\s*:\s*10\.', re.IGNORECASE),
+    re.compile(r'^\s*Volume\s*\d', re.IGNORECASE),
+    re.compile(r'^\s*Issue\s*\d', re.IGNORECASE),
+    re.compile(r'^\s*Impact\s+Factor', re.IGNORECASE),
+    re.compile(r'^\s*Published\s+(by|in)\b', re.IGNORECASE),
+    re.compile(r'^\s*https?://\S+\s*$'),
+    re.compile(r'^\s*\d{1,4}\s*$'),
+    re.compile(r'^\s*(Department|Faculty|Institute|School)\s+[Oo]f\b'),
+    re.compile(r'^\s*University\s+(of|College)\b', re.IGNORECASE),
+]
+
+
+def clean_header_text(text: str, body_start_marker: str = "") -> str:
+    """Remove journal header/title block before the actual body text."""
+    if body_start_marker and len(body_start_marker) > 15:
+        idx = text.find(body_start_marker[:60])
+        if idx > 0:
+            return text[idx:]
+
+    lines = text.split('\n')
+    body_start_line = 0
+    in_header = True
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_header = (
+            any(p.match(line) for p in _HEADER_LINE_PATTERNS) or
+            len(stripped) < 5
+        )
+        if not is_header and len(stripped) > 40:
+            in_header = False
+        if not in_header:
+            body_start_line = i
+            break
+
+    return '\n'.join(lines[body_start_line:]) if body_start_line else text
+
+
+def log_job(job: dict):
+    try:
+        with open(JOBS_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(job, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("Job-Log fehlgeschlagen: %s", e)
 
 
 def _noise_reason(term: str) -> str | None:
@@ -957,7 +1013,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.6.0"
+MNEME_VERSION = "2.7.0"
 
 
 @app.get("/version")
@@ -1183,6 +1239,24 @@ def confirm_process(req: ConfirmRequest):
             "doi": meta.get("doi", ""),
         }, meta.get("affiliation", ""))
 
+    cost_info = draft.get("cost", {})
+    cost_eur = round(
+        (cost_info.get("input_tokens", 0) * HAIKU_PRICE_INPUT_PER_TOKEN +
+         cost_info.get("output_tokens", 0) * HAIKU_PRICE_OUTPUT_PER_TOKEN +
+         cost_info.get("cache_read_tokens", 0) * HAIKU_PRICE_CACHE_READ_PER_TOKEN +
+         cost_info.get("cache_creation_tokens", 0) * HAIKU_PRICE_CACHE_WRITE_PER_TOKEN) * EUR_RATE, 5
+    )
+    log_job({
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "filename": output_filename,
+        "source_pdf": draft.get("source_pdf", ""),
+        "model": draft.get("stats", {}).get("model_used", ""),
+        "links": total_links,
+        "new_tokens": len(selected_new),
+        "elapsed_s": draft.get("process_elapsed_s", 0),
+        "cost_eur": cost_eur,
+        "status": "ok",
+    })
     logger.info("CONFIRMED: %d links | %d stubs | %s", total_links, stubs_created, output_filename)
     _pending_draft = None
     return {
@@ -1316,7 +1390,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
                 f"---\ntitle: {chapter_title}\nchapter: {chapter_num}\n"
                 f'book: "[[{overview_link}|{book_title_safe}]]"\n'
                 f"tags:\n  - book-chapter\n"
-                f"source_pdf: {file.filename or 'book.pdf'}\n"
+                f"source_pdf: {yaml_str(file.filename or 'book.pdf')}\n"
                 f"mneme_version: {MNEME_VERSION}\n---\n\n"
                 f"> Teil von [[{overview_link}|{book_title_safe}]]\n\n"
             )
@@ -1347,7 +1421,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
     overview_content = (
         f"---\ntitle: {book_meta.get('title', '')}\nauthor: {author_str}\n"
         f"{authors_yaml}year: {book_meta.get('year', '')}\ntype: book\n"
-        f"tags:\n  - book-note\nsource_pdf: {file.filename or 'book.pdf'}\n"
+        f"tags:\n  - book-note\nsource_pdf: {yaml_str(file.filename or 'book.pdf')}\n"
         f"mneme_version: {MNEME_VERSION}\n---\n\n"
         f"## Inhalt\n\n"
         f"```dataview\n"
@@ -1390,6 +1464,41 @@ def get_authors():
         except Exception:
             pass
     return {"authors": authors, "count": len(authors)}
+
+
+@app.get("/jobs")
+def get_jobs(limit: int = 50):
+    if not JOBS_PATH.exists():
+        return {"jobs": [], "count": 0}
+    try:
+        lines = [ln for ln in JOBS_PATH.read_text(encoding="utf-8").strip().split("\n") if ln.strip()]
+        recent = [json.loads(ln) for ln in lines[-limit:]]
+        recent.reverse()
+        return {"jobs": recent, "count": len(lines)}
+    except Exception as e:
+        logger.warning("Jobs-Lesen fehlgeschlagen: %s", e)
+        return {"jobs": [], "count": 0}
+
+
+@app.post("/vault/reset")
+def vault_reset():
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    deleted_dirs = 0
+    deleted_files = 0
+    for folder in ("Personen", "Methoden", "Konzepte"):
+        d = Path(vault_path) / folder
+        if d.is_dir():
+            shutil.rmtree(d)
+            deleted_dirs += 1
+    tok_path = Path(vault_path) / TOKENS_FILENAME
+    if tok_path.exists():
+        tok_path.unlink()
+        deleted_files += 1
+    logger.info("VAULT RESET: %d Ordner, %d Dateien gelöscht", deleted_dirs, deleted_files)
+    return {"ok": True, "deleted_dirs": deleted_dirs, "deleted_files": deleted_files}
 
 
 @app.post("/tokens/migrate")
@@ -1622,6 +1731,8 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     if not vault_path or not Path(vault_path).is_dir():
         raise HTTPException(status_code=400, detail="vault_path_not_set")
 
+    _process_start = datetime.datetime.now()
+
     if full_text_override is not None:
         full_text = full_text_override.strip()
         if len(full_text) < 50:
@@ -1813,10 +1924,14 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
 
     main_body = main_body_h
 
+    # Clean header block (institute, DOI, ISSN etc.) from body text
+    body_start_marker = meta.get("body_start_marker", "")
+    clean_body = clean_header_text(full_text, body_start_marker)
+
     sections_parts = []
     if abstract:
         sections_parts.append(f"## Abstract\n\n{abstract}")
-    sections_parts.append(f"## Volltext\n\n{full_text}")  # always full document text
+    sections_parts.append(f"## Volltext\n\n{clean_body}")
     if references:
         sections_parts.append(f"## Literatur\n\n{references}")
     sections_text = "\n\n".join(sections_parts)
@@ -1837,7 +1952,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         frontmatter += f"citation_apa: {yaml_str(meta['citation_apa'])}\n"
     if meta.get("citation_chicago"):
         frontmatter += f"citation_chicago: {yaml_str(meta['citation_chicago'])}\n"
-    frontmatter += f"tags:\n  - literature-note\nsource_pdf: {filename}\nmneme_version: {MNEME_VERSION}\n---\n\n"
+    frontmatter += f"tags:\n  - literature-note\nsource_pdf: {yaml_str(filename)}\nmneme_version: {MNEME_VERSION}\n---\n\n"
 
     preview_content = apply_wikilinks(frontmatter + sections_text, preview_terms)
     total_links = len(re.findall(r"\[\[.+?\]\]", preview_content))
@@ -1894,9 +2009,14 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
             "chunks": chunks_count,
             "citation_apa": meta.get("citation_apa", ""),
         },
+        "process_elapsed_s": round(
+            (datetime.datetime.now() - _process_start).total_seconds(), 1
+        ),
         "cost": {
             "input_tokens": _last_run_stats["input_tokens"],
             "output_tokens": _last_run_stats["output_tokens"],
+            "cache_read_tokens": _last_run_stats.get("cache_read_tokens", 0),
+            "cache_creation_tokens": _last_run_stats.get("cache_creation_tokens", 0),
             "phase1_model": phase1_model,
         },
     }

@@ -420,6 +420,13 @@
     .tree-file { color: var(--text2); cursor: pointer; display: block; padding-left: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tree-file:hover { color: var(--accent); }
 
+    /* Jobs page */
+    .job-row { padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .job-row:last-child { border-bottom: none; }
+    .job-file { font-size: 14px; font-weight: 500; color: var(--text); margin-bottom: 3px; word-break: break-all; }
+    .job-meta { font-size: 12px; color: var(--text2); line-height: 1.6; }
+    .job-empty { font-size: 14px; color: var(--text2); text-align: center; padding: 32px 0; }
+
     /* Type badges */
     .tbadge.person { background: rgba(52,199,89,0.12); color: #1a7a35; }
     .tbadge.concept { background: rgba(0,113,227,0.08); color: var(--accent); }
@@ -566,6 +573,11 @@
       <div class="status-dot" id="ollama-dot"></div>
       <span id="ollama-label">Ollama</span>
     </div>
+    <button class="btn-icon" id="btn-jobs" title="Verarbeitete Notizen">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </button>
     <button class="btn-icon" id="btn-bulk" title="Bulk-Verarbeitung">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
@@ -724,6 +736,14 @@
 
   </div>
 
+  <!-- Jobs page -->
+  <div class="page" id="page-jobs">
+    <div class="card">
+      <div class="card-title">Verarbeitete Notizen <span id="jobs-count" style="color:var(--text2);font-weight:400"></span></div>
+      <div id="jobs-list"><div class="job-empty">Lade…</div></div>
+    </div>
+  </div>
+
   <!-- Bulk page -->
   <div class="page" id="page-bulk">
 
@@ -796,6 +816,9 @@
         <button class="btn-secondary" id="btn-migrate-tokens" style="font-size:13px;padding:8px 14px">
           Auf v2.4 migrieren
         </button>
+        <button class="btn-danger" id="btn-vault-reset" style="font-size:13px;padding:8px 14px">
+          Vault Reset
+        </button>
       </div>
     </div>
 
@@ -833,7 +856,9 @@
   const pageTokens = document.getElementById('page-tokens');
   const pageReview = document.getElementById('page-review');
   const pageBulk = document.getElementById('page-bulk');
+  const pageJobs = document.getElementById('page-jobs');
   const btnBulk = document.getElementById('btn-bulk');
+  const btnJobs = document.getElementById('btn-jobs');
   const btnSettings = document.getElementById('btn-settings');
   const btnHome = document.getElementById('btn-home');
   const btnTokens = document.getElementById('btn-tokens');
@@ -854,6 +879,7 @@
   btnHome.addEventListener('click', () => showPage('home'));
   btnTokens.addEventListener('click', () => showPage('tokens'));
   btnBulk.addEventListener('click', () => showPage('bulk'));
+  btnJobs.addEventListener('click', () => showPage('jobs'));
   document.getElementById('banner-settings-link').addEventListener('click', () => showPage('settings'));
 
   function showPage(page) {
@@ -868,14 +894,17 @@
     pageTokens.classList.toggle('active', page === 'tokens');
     pageReview.classList.toggle('active', page === 'review');
     pageBulk.classList.toggle('active', page === 'bulk');
+    pageJobs.classList.toggle('active', page === 'jobs');
     const onReview = page === 'review';
     btnSettings.style.display = (page === 'settings' || onReview) ? 'none' : 'flex';
     btnHome.style.display = page === 'home' ? 'none' : 'flex';
     btnTokens.style.display = (page === 'tokens' || onReview) ? 'none' : 'flex';
     btnBulk.style.display = (page === 'bulk' || onReview) ? 'none' : 'flex';
+    btnJobs.style.display = (page === 'jobs' || onReview) ? 'none' : 'flex';
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
     if (page === 'review') renderReview();
+    if (page === 'jobs') loadJobsPage();
   }
 
   // Ollama status
@@ -1317,6 +1346,41 @@
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
+  document.getElementById('btn-vault-reset').addEventListener('click', async () => {
+    if (!confirm('Alle Stubs (Personen/, Methoden/, Konzepte/) und tokens.json löschen?\nLiterature Notes bleiben erhalten.')) return;
+    try {
+      const r = await fetch(`${API}/vault/reset`, { method: 'POST' });
+      const data = await r.json();
+      if (r.ok) showToast(`Reset: ${data.deleted_dirs} Ordner, ${data.deleted_files} Dateien gelöscht`);
+      else showToast(`Fehler: ${data.detail || r.statusText}`);
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
+
+  // Jobs page
+  async function loadJobsPage() {
+    document.getElementById('jobs-list').innerHTML = '<div class="job-empty">Lade…</div>';
+    try {
+      const r = await fetch(`${API}/jobs`);
+      const data = await r.json();
+      document.getElementById('jobs-count').textContent = `(${data.count} gesamt)`;
+      if (!data.jobs || !data.jobs.length) {
+        document.getElementById('jobs-list').innerHTML = '<div class="job-empty">Noch keine verarbeiteten Notizen</div>';
+        return;
+      }
+      document.getElementById('jobs-list').innerHTML = data.jobs.map(j => {
+        const ts = j.timestamp ? j.timestamp.replace('T', ' ') : '';
+        const elapsed = j.elapsed_s > 0 ? ` · ${Math.floor(j.elapsed_s/60)}:${String(Math.round(j.elapsed_s%60)).padStart(2,'0')}` : '';
+        const cost = j.cost_eur > 0 ? ` · ~${(j.cost_eur * 100).toFixed(3)}¢` : '';
+        const tokens = j.new_tokens > 0 ? ` · +${j.new_tokens} Begriffe` : '';
+        return `<div class="job-row">
+          <div class="job-file">${j.filename || '—'}</div>
+          <div class="job-meta">${j.model || ''}${j.links ? ` · ${j.links} Links` : ''}${tokens}${cost}${elapsed}</div>
+          <div class="job-meta" style="color:var(--text2);opacity:0.7">${ts}${j.source_pdf ? ' · ' + j.source_pdf : ''}</div>
+        </div>`;
+      }).join('');
+    } catch { document.getElementById('jobs-list').innerHTML = '<div class="job-empty">Backend nicht erreichbar</div>'; }
+  }
+
   // Bulk page
   let rawPdfList = [];
 
@@ -1439,9 +1503,11 @@
         `${s.model_used} · ${s.chunks} Chunks · ${costStr}`;
     }
     if (processStartTime !== null) {
-      const elapsed = ((performance.now() - processStartTime) / 1000).toFixed(1);
+      const totalSec = Math.round((performance.now() - processStartTime) / 1000);
+      const mins = Math.floor(totalSec / 60);
+      const secs = (totalSec % 60).toString().padStart(2, '0');
       const elapsedEl = document.getElementById('review-elapsed');
-      elapsedEl.textContent = `Verarbeitungszeit: ${elapsed}s`;
+      elapsedEl.textContent = `Verarbeitungszeit: ${mins}:${secs}`;
       elapsedEl.style.display = 'block';
       processStartTime = null;
     }
