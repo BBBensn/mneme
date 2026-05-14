@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-14
+date_created: 2026-05-14 06:54:00
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-14 06:54:00
 ---
 
 # v2.5.0 — YAML Fix + Autoren Dataview + Sections-Erkennung + Buch-Modus (2026-05-14)

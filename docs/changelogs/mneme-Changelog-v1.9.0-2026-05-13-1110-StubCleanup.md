@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 11:10:11
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 11:10:11
 ---
 
 # v1.9.0 — Stub-Cleanup + Klassifizierung + Duplikat-UI (2026-05-13)

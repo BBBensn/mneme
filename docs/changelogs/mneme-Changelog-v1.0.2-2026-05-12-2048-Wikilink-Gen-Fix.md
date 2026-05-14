@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 20:48:19
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 20:48:19
 ---
 
 # v1.0.2 — Wikilink-Generierung Fix (2026-05-12)

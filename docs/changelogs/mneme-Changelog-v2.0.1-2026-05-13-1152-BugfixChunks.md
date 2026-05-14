@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 11:52:27
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 11:52:27
 ---
 
 # v2.0.1 — Bugfix: NameError chunks + robuste Fehleranzeige (2026-05-13)

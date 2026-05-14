@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 22:47:01
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 22:47:01
 ---
 
 # v1.7.0 — Vier Verbesserungen (2026-05-12)

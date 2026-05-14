@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 13:48:52
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 13:48:52
 ---
 
 # v2.2.0 — Review-Interface + Noise-Filter (2026-05-13)

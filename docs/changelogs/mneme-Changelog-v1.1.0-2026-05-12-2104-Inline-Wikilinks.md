@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:04:47
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:04:47
 ---
 
 # v1.1.0 — Vollständiges Inline-Wikilink-Tagging (2026-05-12)

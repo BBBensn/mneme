@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:27:31
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:27:31
 ---
 
 # v1.3.0 — Claude API als primäres Modell (2026-05-12)

@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:57:56
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:57:56
 ---
 
 # v1.5.0 — Versionierung + Prompt-Präzisierung (2026-05-12)

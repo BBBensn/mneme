@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 12:46:17
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 12:46:17
 ---
 
 # v2.1.0 — Ollama-Qualität + Progress-Anzeige (2026-05-13)

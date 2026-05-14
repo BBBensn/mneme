@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:12:44
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:12:44
 ---
 
 # v1.2.0 — Zweistufiges Linking + File-Logging + Auto-Reload (2026-05-12)

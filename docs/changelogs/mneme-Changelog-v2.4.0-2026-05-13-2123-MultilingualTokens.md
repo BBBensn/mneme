@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 21:23:49
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 21:23:49
 ---
 
 # v2.4.0 — Multilingual Tokens + Titelextraktion + Autoren-DB (2026-05-13)

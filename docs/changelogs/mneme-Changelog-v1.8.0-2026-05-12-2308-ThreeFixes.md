@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 23:08:40
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 23:08:40
 ---
 
 # v1.8.0 — Drei Fixes + Stub-File Erstellung (2026-05-12)

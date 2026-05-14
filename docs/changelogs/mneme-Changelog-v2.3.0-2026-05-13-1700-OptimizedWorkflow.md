@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 17:00:19
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 17:00:19
 ---
 
 # v2.3.0 — Optimierte Arbeitsteilung + Bulk-Verarbeitung (2026-05-13)

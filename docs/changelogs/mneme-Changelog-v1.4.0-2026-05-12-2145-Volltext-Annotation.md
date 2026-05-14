@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:45:29
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:45:29
 ---
 
 # v1.4.0 — Volltext-Annotation statt Summarizing (2026-05-12)

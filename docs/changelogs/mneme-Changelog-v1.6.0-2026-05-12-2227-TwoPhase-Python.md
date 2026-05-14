@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 22:27:25
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 22:27:25
 ---
 
 # v1.6.0 — Zweiphasen-Ansatz: KI erkennt, Python ersetzt (2026-05-12)

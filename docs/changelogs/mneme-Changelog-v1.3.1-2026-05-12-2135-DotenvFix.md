@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-12
+date_created: 2026-05-12 21:35:03
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-12 21:35:03
 ---
 
 # v1.3.1 — Dotenv Fix (2026-05-12)

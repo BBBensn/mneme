@@ -1,9 +1,10 @@
 ---
-date_created: 2026-05-13
+date_created: 2026-05-13 11:59:22
 type: changelog
 tags:
   - project
   - changelog
+date_modified: 2026-05-13 11:59:22
 ---
 
 # v2.0.2 — Bugfix: @app.post("/process") auf falsche Funktion (2026-05-13)
