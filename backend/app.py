@@ -491,7 +491,7 @@ def parse_metadata(raw: str) -> dict:
 def derive_output_filename(meta: dict, fallback: str) -> str:
     author = meta.get("author", "").split(",")[0].strip()[:30]
     year = meta.get("year", "")
-    title = meta.get("title", "").strip()[:30]
+    title = meta.get("title", "").strip()[:60]
     parts = [p for p in [author, year, title] if p]
     raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
     safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
@@ -681,7 +681,7 @@ def _dataview_block(safe_name: str) -> str:
     return (
         f"\n## Werke\n\n"
         f"```dataview\n"
-        f'TABLE year, journal FROM "/"\n'
+        f'TABLE year, journal\n'
         f'WHERE contains(string(author), "{safe_name}")'
         f' OR contains(string(authors), "{safe_name}")\n'
         f"SORT year DESC\n"
@@ -881,16 +881,23 @@ def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
     """Find actual PDF page indices by searching for chapter titles in page text."""
     result = []
     for ch in chapters:
-        title_words = ch.get("title", "").split()[:3]
+        title = ch.get("title", "")
+        page_hint = max(0, ch.get("page_start", 1) - 3)
         found_page = None
-        if title_words:
-            pattern = re.compile(re.escape(' '.join(title_words)), re.IGNORECASE)
-            for page_idx in range(len(doc)):
+        # Try progressively shorter substrings of the title (longest first)
+        for frac in (1.0, 0.66, 0.33):
+            sub = title[:max(5, int(len(title) * frac))]
+            if len(sub) < 5:
+                break
+            pattern = re.compile(re.escape(sub), re.IGNORECASE)
+            for page_idx in range(page_hint, len(doc)):
                 if pattern.search(doc[page_idx].get_text()):
                     found_page = page_idx
                     break
+            if found_page is not None:
+                break
         if found_page is None:
-            found_page = max(0, ch.get("page_start", 1) - 1)
+            found_page = max(0, ch.get("page_start", 1) - 2)
         result.append({**ch, "pdf_page": found_page})
     return result
 
@@ -1116,7 +1123,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.2"
+MNEME_VERSION = "2.9.3"
 
 
 @app.get("/version")
@@ -1430,7 +1437,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
     # Phase 0: Chapter detection from first 15 pages
     _processing_status["stage"] = "Kapitelstruktur wird erkannt..."
     _processing_status["progress"] = 0.04
-    toc_text = "\n\n".join(doc[p].get_text() for p in range(min(15, len(doc))))
+    toc_text = "\n\n".join(doc[p].get_text() for p in range(min(25, len(doc))))
     try:
         chapters = parse_chapter_structure(call_claude(api_key, build_chapter_prompt(toc_text), max_tokens=1024))
     except Exception as e:
@@ -1469,6 +1476,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
 
     processed_chapters: list[dict] = []
     errors: list[dict] = []
+    accumulated_terms: dict[str, dict] = {}
 
     for i, chapter in enumerate(chapters_with_pages):
         chapter_num = chapter.get("chapter", i + 1)
@@ -1479,7 +1487,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
         chapter_text = "\n\n".join(
             doc[p].get_text() for p in range(pdf_start, min(pdf_end, len(doc)))
         ).strip()
-        if len(chapter_text) < 80:
+        if len(chapter_text) < 30:
             continue
 
         _processing_status["stage"] = f"Kapitel {chapter_num}/{n}: {chapter_title[:35]}"
@@ -1492,11 +1500,12 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
                 None, chapter_filename, model,
                 stage_prefix=f"[{chapter_num}/{n}] ",
                 full_text_override=chapter_text,
+                extra_cached_terms=accumulated_terms,
             )
             overview_link = f"Bücher/{folder_name}/00-Uebersicht"
             book_title_safe = book_meta.get("title", "").replace('"', "'")
             chapter_frontmatter = (
-                f"---\ntitle: {chapter_title}\nchapter: {chapter_num}\n"
+                f"---\ntitle: {yaml_str(chapter_title)}\nchapter: {chapter_num}\n"
                 f'book: "[[{overview_link}|{book_title_safe}]]"\n'
                 f"tags:\n  - book-chapter\n"
                 f"source_pdf: {yaml_str(file.filename or 'book.pdf')}\n"
@@ -1510,11 +1519,25 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
             chapter_body = apply_wikilinks(draft["sections_text"], final_terms)
             (book_dir / chapter_filename).write_text(chapter_frontmatter + chapter_body, encoding="utf-8")
             save_token_cache(vault_path, draft["new_terms"])
+            # Accumulate new terms for subsequent chapters (no re-recognition needed)
+            for term in draft["new_terms"]:
+                c = term["canonical"]
+                if c not in accumulated_terms:
+                    accumulated_terms[c] = {
+                        "type": term.get("type"),
+                        "aliases": term.get("aliases", [c]),
+                        "translations": term.get("translations", {}),
+                        "forms": term.get("aliases", [c]),
+                    }
             found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', chapter_body))
             term_types = {t["canonical"]: t.get("type") for t in draft["new_terms"]}
             create_stubs(vault_path, found_links, chapter_filename, term_types)
-            processed_chapters.append({"chapter": chapter_num, "title": chapter_title,
-                                        "filename": chapter_filename})
+            chapter_links = len(re.findall(r'\[\[.+?\]\]', chapter_body))
+            processed_chapters.append({
+                "chapter": chapter_num, "title": chapter_title,
+                "filename": chapter_filename,
+                "links": chapter_links, "new_terms": len(draft["new_terms"]),
+            })
         except Exception as e:
             logger.warning("Kapitel %d fehlgeschlagen: %s", chapter_num, e, exc_info=True)
             errors.append({"chapter": chapter_num, "title": chapter_title, "error": str(e)})
@@ -1528,7 +1551,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
     authors_list = parse_author_list(author_str)
     authors_yaml = "authors:\n" + "".join(f"  - {a}\n" for a in authors_list) if authors_list else ""
     overview_content = (
-        f"---\ntitle: {book_meta.get('title', '')}\nauthor: {author_str}\n"
+        f"---\ntitle: {yaml_str(book_meta.get('title', ''))}\nauthor: {yaml_str(author_str)}\n"
         f"{authors_yaml}year: {book_meta.get('year', '')}\ntype: book\n"
         f"tags:\n  - book-note\nsource_pdf: {yaml_str(file.filename or 'book.pdf')}\n"
         f"mneme_version: {MNEME_VERSION}\n---\n\n"
@@ -1639,6 +1662,8 @@ def fix_dataview_query():
                 continue
             new_content = content
             correct = f'WHERE contains(string(author), "{name}") OR contains(string(authors), "{name}")'
+            # Remove FROM "/" from TABLE line (v2.9.2 and earlier)
+            new_content = new_content.replace('TABLE year, journal FROM "/"', 'TABLE year, journal')
             # Replace v2.9.0 wrong format
             new_content = new_content.replace(
                 f'WHERE author = [[{name}]] OR contains(authors, [[{name}]])', correct
@@ -1929,7 +1954,8 @@ async def _process_pdf_inner(file: UploadFile, model: str):
 
 async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
                               stage_prefix: str = "",
-                              full_text_override: str | None = None) -> dict:
+                              full_text_override: str | None = None,
+                              extra_cached_terms: dict | None = None) -> dict:
     """Core processing. Returns a complete draft dict ready for review or bulk confirm."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
@@ -1998,7 +2024,24 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         for f in entry.get("forms", []) + entry.get("aliases", []):
             if f and f.lower() not in cached_alias_map:
                 cached_alias_map[f.lower()] = c
-    logger.info("TOKEN CACHE: %d bekannte Begriffe", len(cached_terms))
+    # Merge accumulated terms from earlier chapters (book mode only)
+    if extra_cached_terms:
+        for c, entry in extra_cached_terms.items():
+            if c not in token_cache:
+                token_cache[c] = entry
+        cached_terms = [
+            {"canonical": c, "aliases": e.get("forms", e.get("aliases", [c]))}
+            for c, e in token_cache.items()
+        ]
+        cached_canonical = set(token_cache.keys())
+        cached_alias_map = {}
+        for c, e in token_cache.items():
+            cached_alias_map[c.lower()] = c
+            for f in e.get("forms", []) + e.get("aliases", []):
+                if f and f.lower() not in cached_alias_map:
+                    cached_alias_map[f.lower()] = c
+    logger.info("TOKEN CACHE: %d bekannte Begriffe (davon %d akkumuliert)",
+                len(cached_terms), len(extra_cached_terms) if extra_cached_terms else 0)
 
     chunks_count = 0
     meta: dict = {}
@@ -2163,7 +2206,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     # Frontmatter — Literature-Note format
     author_str = meta.get("author", "")
     authors_list = parse_author_list(author_str)
-    frontmatter = f"---\ntitle: {meta.get('title', '')}\n"
+    frontmatter = f"---\ntitle: {yaml_str(meta.get('title', ''))}\n"
     frontmatter += format_author_yaml(author_str, authors_list)
     frontmatter += f"year: {meta.get('year', '')}\n"
     for fld in ("journal", "doi"):

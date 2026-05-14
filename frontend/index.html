@@ -1052,10 +1052,14 @@
       if (data.status === 'book_ready') {
         const chapCount = data.chapters ? data.chapters.length : 0;
         const errCount = data.errors ? data.errors.length : 0;
+        const chapDetails = (data.chapters || []).map(c =>
+          `<br><small style="color:var(--text2)">Kap. ${c.chapter}: ${c.links ?? '?'} Links, ${c.new_terms ?? '?'} neue Begriffe — ${c.title}</small>`
+        ).join('');
         setStatus('success',
           `Buch verarbeitet: <strong>${data.book_title || data.folder}</strong><br>` +
           `${chapCount} Kapitel in <code>Bücher/${data.folder}/</code>` +
-          (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '')
+          (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '') +
+          chapDetails
         );
         showToast(`${chapCount} Kapitel gespeichert ✓`);
         loadVaultTree();
