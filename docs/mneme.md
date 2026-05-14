@@ -68,6 +68,8 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.7 Header-Cleanup, Job-Log, Vault Reset, Jobs-Tab ✅ 2026-05-14
 - [x] v2.8 Bugfixes: Titel, Header, Autoren-Links, fix-stubs Endpoint ✅ 2026-05-14
 - [x] v2.9 Dataview-Fix, Alias-Konflikt, Kosten-Optimierung ✅ 2026-05-14
+- [x] v2.9.1 Speichern-Bug Fix ✅ 2026-05-14
+- [x] v2.9.2 Author-Parse Fix, Dataview Fix, Buch-Modus Debug ✅ 2026-05-14
 - [ ] v3.0 Vault Explorer: Token-Liste, Merge-UI
 - [ ] v3.1 Bulk-Verarbeitung (RAW-Data Batch)
 - [ ] v3.x Graph-UI, Literatursuche via Claude API
@@ -77,6 +79,7 @@ Teilprojekt von [[J-Vault]].
 - **Speichern-Bug:** Behoben in v2.9.1. Ursache war fehlender Button-Reset (`btn.disabled = false`) in der Success-Branch des Confirm-Handlers — DOM-Button blieb disabled und war beim nächsten Review ausgegraut.
 - **tokens.json Skalierung:** Wie gut skaliert bei 100+ Papers? Ab wann wird Lookup langsam?
 - **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks (gebatchte Aufrufe: >5 Batches) noch ungeprüft ob Ollama die größeren Input-Texte korrekt verarbeitet.
+- **Buch-Modus Kapitel-Fehler:** Ursache für "Kapitel 4 fehlgeschlagen" noch unklar — exc_info=True in v2.9.2 eingebaut, beim nächsten Auftreten mneme.log prüfen.
 
 ## Stack & Infrastruktur
 

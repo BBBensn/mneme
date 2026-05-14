@@ -628,8 +628,20 @@ def count_backlinks(vault_path: str, term: str) -> int:
 def parse_author_list(author_str: str) -> list[str]:
     if not author_str:
         return []
+    # Split on &, ;, "und", "and" first
     parts = re.split(r'\s*[&;]\s*|\s+und\s+|\s+and\s+', author_str)
-    return [p.strip() for p in parts if p.strip()]
+    result = []
+    for part in parts:
+        commas = part.count(',')
+        if commas == 0:
+            result.append(part.strip())
+        elif commas == 1:
+            # "Nachname, Vorname" (single author, APA) → keep as one
+            result.append(part.strip())
+        else:
+            # Multiple commas → "Nachname, Vorname, Nachname2, Vorname2" or list
+            result.extend(p.strip() for p in part.split(',') if p.strip())
+    return [r for r in result if r]
 
 
 def get_author_stub_name(author: str) -> str:
@@ -670,7 +682,8 @@ def _dataview_block(safe_name: str) -> str:
         f"\n## Werke\n\n"
         f"```dataview\n"
         f'TABLE year, journal FROM "/"\n'
-        f'WHERE author = [[{safe_name}]] OR contains(authors, [[{safe_name}]])\n'
+        f'WHERE contains(string(author), "{safe_name}")'
+        f' OR contains(string(authors), "{safe_name}")\n'
         f"SORT year DESC\n"
         f"```\n"
     )
@@ -1103,7 +1116,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.1"
+MNEME_VERSION = "2.9.2"
 
 
 @app.get("/version")
@@ -1421,7 +1434,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
     try:
         chapters = parse_chapter_structure(call_claude(api_key, build_chapter_prompt(toc_text), max_tokens=1024))
     except Exception as e:
-        logger.warning("Kapitel-Extraktion fehlgeschlagen: %s", e)
+        logger.warning("Kapitel-Extraktion fehlgeschlagen: %s", e, exc_info=True)
         chapters = []
 
     if not chapters:
@@ -1503,7 +1516,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
             processed_chapters.append({"chapter": chapter_num, "title": chapter_title,
                                         "filename": chapter_filename})
         except Exception as e:
-            logger.warning("Kapitel %d fehlgeschlagen: %s", chapter_num, e)
+            logger.warning("Kapitel %d fehlgeschlagen: %s", chapter_num, e, exc_info=True)
             errors.append({"chapter": chapter_num, "title": chapter_title, "error": str(e)})
 
     doc.close()
@@ -1527,7 +1540,9 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
         f"```\n"
     )
     (book_dir / "00-Uebersicht.md").write_text(overview_content, encoding="utf-8")
-    logger.info("BUCH FERTIG: %d Kapitel | %d Fehler | %s", len(processed_chapters), len(errors), folder_name)
+    logger.info("BUCH FERTIG: %d Kapitel | %d Fehler | %s | Errors: %s",
+                len(processed_chapters), len(errors), folder_name,
+                [(e["chapter"], e["error"]) for e in errors])
 
     return {
         "status": "book_ready",
@@ -1592,14 +1607,7 @@ def fix_author_stubs():
             content = md_file.read_text(encoding="utf-8")
             name = md_file.stem
             if "## Werke" in content:
-                # Also update old query format (v2.8 → v2.9)
-                old_query = f'WHERE contains(string(author), "{name}") OR contains(authors, "{name}")'
-                new_query = f'WHERE author = [[{name}]] OR contains(authors, [[{name}]])'
-                if old_query in content:
-                    md_file.write_text(content.replace(old_query, new_query), encoding="utf-8")
-                    fixed += 1
-                else:
-                    skipped += 1
+                skipped += 1
                 continue
             if "- author" not in content[:400] and "type: person" not in content[:400]:
                 skipped += 1
@@ -1610,6 +1618,42 @@ def fix_author_stubs():
             skipped += 1
     logger.info("FIX AUTHOR STUBS: %d fixed, %d skipped", fixed, skipped)
     return {"ok": True, "fixed": fixed, "skipped": skipped}
+
+
+@app.post("/authors/fix-dataview-query")
+def fix_dataview_query():
+    """Update Dataview queries in Personen/ stubs to current format."""
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    personen_dir = Path(vault_path) / "Personen"
+    if not personen_dir.is_dir():
+        return {"ok": True, "fixed": 0}
+    fixed = 0
+    for md_file in personen_dir.glob("*.md"):
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            name = md_file.stem
+            if "## Werke" not in content:
+                continue
+            new_content = content
+            correct = f'WHERE contains(string(author), "{name}") OR contains(string(authors), "{name}")'
+            # Replace v2.9.0 wrong format
+            new_content = new_content.replace(
+                f'WHERE author = [[{name}]] OR contains(authors, [[{name}]])', correct
+            )
+            # Replace v2.8 format (missing string() on authors)
+            new_content = new_content.replace(
+                f'WHERE contains(string(author), "{name}") OR contains(authors, "{name}")', correct
+            )
+            if new_content != content:
+                md_file.write_text(new_content, encoding="utf-8")
+                fixed += 1
+        except Exception:
+            pass
+    logger.info("FIX DATAVIEW QUERY: %d fixed", fixed)
+    return {"ok": True, "fixed": fixed}
 
 
 @app.post("/authors/fix-author-field")

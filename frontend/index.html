@@ -822,6 +822,9 @@
         <button class="btn-secondary" id="btn-fix-author-field" style="font-size:13px;padding:8px 14px">
           Autoren-Felder reparieren
         </button>
+        <button class="btn-secondary" id="btn-fix-dataview-query" style="font-size:13px;padding:8px 14px">
+          Dataview-Queries reparieren
+        </button>
         <button class="btn-danger" id="btn-vault-reset" style="font-size:13px;padding:8px 14px">
           Vault Reset
         </button>
@@ -1356,6 +1359,15 @@
       const r = await fetch(`${API}/tokens/migrate`, { method: 'POST' });
       const data = await r.json();
       showToast(data.message || (data.ok ? 'Migration abgeschlossen' : 'Fehler'));
+    } catch { showToast('Backend nicht erreichbar'); }
+  });
+
+  document.getElementById('btn-fix-dataview-query').addEventListener('click', async () => {
+    try {
+      const r = await fetch(`${API}/authors/fix-dataview-query`, { method: 'POST' });
+      const data = await r.json();
+      if (r.ok) showToast(`Dataview-Queries: ${data.fixed} Stubs repariert`);
+      else showToast(`Fehler: ${data.detail || r.statusText}`);
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
