@@ -489,15 +489,14 @@ def parse_metadata(raw: str) -> dict:
 
 
 def derive_output_filename(meta: dict, fallback: str) -> str:
-    # "Philipp Niemann", 2023, "Evaluationsmethoden der Wissenschaftskommunikation..."
-    # → "Philipp-Niemann-2023-Evaluationsmethoden-der-Wissenschaftskommunikation.md"
+    # "Ogwudile Chinenye Linda", 2025, "Stufflebeam's CIPP Model of Evaluation"
+    # → "Ogwudile Chinenye Linda-2025-Stufflebeam's CIPP Model of Evaluation.md"
     author = (meta.get("author") or "").strip()[:40]
     year = (meta.get("year") or "").strip()
     title = (meta.get("title") or "").strip()[:80]
     parts = [p for p in [author, year, title] if p]
-    raw_name = " ".join(parts) if parts else fallback.replace(".pdf", "")
-    safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name)
-    safe_name = re.sub(r'\s+', '-', safe_name).strip('-')
+    raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
+    safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
     return f"{safe_name}.md"
 
 
@@ -1111,7 +1110,7 @@ class BulkConfirmRequest(BaseModel):
 
 
 class DuplicateCheckRequest(BaseModel):
-    filename: str
+    pdf_filename: str
 
 
 @app.post("/config")
@@ -1129,7 +1128,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.5"
+MNEME_VERSION = "2.9.6"
 
 
 @app.get("/version")
@@ -1139,28 +1138,38 @@ def get_version():
 
 @app.post("/check/duplicate")
 def check_duplicate(req: DuplicateCheckRequest):
+    """Check if a PDF was already processed by matching source_pdf in existing notes."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
     if not vault_path or not Path(vault_path).is_dir():
-        return {"exists": False, "existing_file": None, "similar": []}
-    # Heuristic: derive filename from the raw PDF name (no metadata yet)
-    output_filename = derive_output_filename({}, req.filename)
+        return {"exists": False, "existing_file": None}
+    target = req.pdf_filename.strip().lower()
     vault = Path(vault_path)
-    exists = (vault / output_filename).exists()
-    # Look for similar files: same stem prefix (first 20 chars) in vault root
-    stem_prefix = Path(output_filename).stem[:20].lower()
-    similar = [
-        f.name for f in vault.glob("*.md")
-        if f.name != output_filename and f.stem[:20].lower().startswith(stem_prefix[:10])
-    ]
-    # Also check for existing book folder
-    folder_name = output_filename.replace(".md", "")
-    book_exists = (vault / "Bücher" / folder_name).is_dir()
-    return {
-        "exists": exists or book_exists,
-        "existing_file": output_filename if (exists or book_exists) else None,
-        "similar": similar[:5],
-    }
+    # Search vault root .md files for matching source_pdf (only first 30 lines, fast)
+    for md_file in vault.glob("*.md"):
+        try:
+            lines = md_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
+            for line in lines:
+                if line.strip().lower().startswith("source_pdf:"):
+                    val = line.split(":", 1)[1].strip().strip("'\"")
+                    if val.lower() == target:
+                        return {"exists": True, "existing_file": md_file.name}
+        except Exception:
+            pass
+    # Also check Bücher/ subdirectories for book-mode notes
+    bucher_dir = vault / "Bücher"
+    if bucher_dir.is_dir():
+        for md_file in bucher_dir.rglob("*.md"):
+            try:
+                lines = md_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
+                for line in lines:
+                    if line.strip().lower().startswith("source_pdf:"):
+                        val = line.split(":", 1)[1].strip().strip("'\"")
+                        if val.lower() == target:
+                            return {"exists": True, "existing_file": str(md_file.relative_to(vault))}
+            except Exception:
+                pass
+    return {"exists": False, "existing_file": None}
 
 
 @app.get("/last_run_cost")
