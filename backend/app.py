@@ -489,12 +489,15 @@ def parse_metadata(raw: str) -> dict:
 
 
 def derive_output_filename(meta: dict, fallback: str) -> str:
-    author = meta.get("author", "").split(",")[0].strip()[:30]
-    year = meta.get("year", "")
-    title = meta.get("title", "").strip()[:60]
+    # "Philipp Niemann", 2023, "Evaluationsmethoden der Wissenschaftskommunikation..."
+    # → "Philipp-Niemann-2023-Evaluationsmethoden-der-Wissenschaftskommunikation.md"
+    author = (meta.get("author") or "").strip()[:40]
+    year = (meta.get("year") or "").strip()
+    title = (meta.get("title") or "").strip()[:80]
     parts = [p for p in [author, year, title] if p]
-    raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
-    safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
+    raw_name = " ".join(parts) if parts else fallback.replace(".pdf", "")
+    safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name)
+    safe_name = re.sub(r'\s+', '-', safe_name).strip('-')
     return f"{safe_name}.md"
 
 
@@ -1107,6 +1110,10 @@ class BulkConfirmRequest(BaseModel):
     merged_terms: list[dict] = []
 
 
+class DuplicateCheckRequest(BaseModel):
+    filename: str
+
+
 @app.post("/config")
 def update_config(update: ConfigUpdate):
     cfg = load_config()
@@ -1122,12 +1129,38 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.4"
+MNEME_VERSION = "2.9.5"
 
 
 @app.get("/version")
 def get_version():
     return {"version": MNEME_VERSION}
+
+
+@app.post("/check/duplicate")
+def check_duplicate(req: DuplicateCheckRequest):
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        return {"exists": False, "existing_file": None, "similar": []}
+    # Heuristic: derive filename from the raw PDF name (no metadata yet)
+    output_filename = derive_output_filename({}, req.filename)
+    vault = Path(vault_path)
+    exists = (vault / output_filename).exists()
+    # Look for similar files: same stem prefix (first 20 chars) in vault root
+    stem_prefix = Path(output_filename).stem[:20].lower()
+    similar = [
+        f.name for f in vault.glob("*.md")
+        if f.name != output_filename and f.stem[:20].lower().startswith(stem_prefix[:10])
+    ]
+    # Also check for existing book folder
+    folder_name = output_filename.replace(".md", "")
+    book_exists = (vault / "Bücher" / folder_name).is_dir()
+    return {
+        "exists": exists or book_exists,
+        "existing_file": output_filename if (exists or book_exists) else None,
+        "similar": similar[:5],
+    }
 
 
 @app.get("/last_run_cost")

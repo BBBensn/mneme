@@ -965,7 +965,7 @@
     if (fileInput.files[0]) setFile(fileInput.files[0]);
   });
 
-  function setFile(f) {
+  async function setFile(f) {
     selectedFile = f;
     dropZone.querySelector('.drop-title').textContent = f.name;
     dropZone.querySelector('.drop-sub').textContent = formatBytes(f.size);
@@ -989,7 +989,28 @@
           clearStatus();
         });
       }, 0);
+      return; // Buch-Hinweis hat Vorrang, kein Duplikat-Check nötig
     }
+    // Duplikat-Check
+    try {
+      const r = await fetch(`${API}/check/duplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: f.name }),
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.exists && data.existing_file) {
+        setStatus('info',
+          `⚠ Eine Note mit ähnlichem Namen existiert bereits: <strong>${data.existing_file}</strong><br>` +
+          `<span style="color:var(--text2);font-size:12px">Trotzdem verarbeiten → Note wird überschrieben oder als neue Datei gespeichert</span>`
+        );
+      } else if (data.similar && data.similar.length) {
+        setStatus('info',
+          `Ähnliche Notes gefunden: ${data.similar.slice(0,3).join(', ')}`
+        );
+      }
+    } catch { /* Backend nicht erreichbar — still fail */ }
   }
 
   function formatBytes(b) {
