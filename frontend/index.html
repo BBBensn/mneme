@@ -434,17 +434,15 @@
     .tbadge.noise { background: rgba(255,59,48,0.07); color: var(--danger); }
 
     /* Book preview */
-    .bkp-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--border); width:100%; }
+    #bkp-chapter-list { --bkp-cols: 20px 56px 56px 1fr 0.6fr 24px; }
+    .bkp-row { display:grid; grid-template-columns: var(--bkp-cols); align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--border); width:100%; }
     .bkp-row:last-child { border-bottom:none; }
-    .bkp-row.section { color:#999; font-size:12px; }
-    .bkp-row input[type="checkbox"] { width:20px; flex-shrink:0; }
-    .bkp-title-input { flex:3; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
-    .bkp-author-input { flex:2; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
-    .bkp-page-input { width:52px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
-    .bkp-end-input { width:52px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
-    .bkp-del { width:24px; background:none; border:none; cursor:pointer; color:var(--text2); padding:2px 4px; font-size:17px; flex-shrink:0; line-height:1; }
+    .bkp-row.section { color:#aaa; font-size:12px; }
+    .bkp-page-input, .bkp-end-input { width:100%; padding:4px; font-size:13px; border:1px solid #e0e0e0; border-radius:6px; text-align:center; color:var(--text); background:var(--surface); }
+    .bkp-title-input, .bkp-author-input { width:100%; padding:4px 8px; font-size:13px; border:1px solid #e0e0e0; border-radius:6px; color:var(--text); background:var(--surface); }
+    .bkp-del { width:100%; background:none; border:none; cursor:pointer; color:var(--text2); padding:2px; font-size:17px; line-height:1; text-align:center; }
     .bkp-del:hover { color:var(--danger); }
-    .bkp-type-badge { font-size:11px; padding:1px 6px; border-radius:8px; background:rgba(255,159,10,0.12); color:#7a4a00; white-space:nowrap; flex-shrink:0; }
+    .bkp-type-badge { font-size:11px; padding:1px 6px; border-radius:8px; background:rgba(255,159,10,0.12); color:#7a4a00; white-space:nowrap; }
 
     /* Bulk page */
     .pdf-row {
@@ -1043,26 +1041,8 @@
     dropZone.querySelector('.drop-sub').textContent = formatBytes(f.size);
     btnProcess.disabled = false;
     clearStatus();
-    // Buch-Modus Hinweis für große Dokumente im Artikel-Modus
-    if (processingType === 'article' && f.size > 3 * 1024 * 1024) {
-      const sizeMb = (f.size / 1024 / 1024).toFixed(1);
-      setStatus('info',
-        `Großes Dokument (~${sizeMb} MB). Buch-Modus könnte besser geeignet sein und läuft schneller. ` +
-        `<a href="#" id="switch-to-book" style="color:var(--accent);font-weight:500">→ Zum Buch-Modus wechseln</a>`
-      );
-      setTimeout(() => {
-        const link = document.getElementById('switch-to-book');
-        if (link) link.addEventListener('click', e => {
-          e.preventDefault();
-          document.getElementById('type-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
-          document.querySelector('[data-type="book"]').classList.add('active');
-          processingType = 'book';
-          document.getElementById('type-sub-text').textContent = 'Buchkapitel werden einzeln verarbeitet';
-          clearStatus();
-        });
-      }, 0);
-      return; // Buch-Hinweis hat Vorrang, kein Duplikat-Check nötig
-    }
+    updateBookWarning();
+    if (processingType === 'article' && f.size > 3 * 1024 * 1024) return;
     // Duplikat-Check via source_pdf
     try {
       const r = await fetch(`${API}/check/duplicate`, {
@@ -1110,7 +1090,7 @@
       processingType = btn.dataset.type;
       document.getElementById('type-sub-text').textContent =
         processingType === 'book' ? 'Buchkapitel werden einzeln verarbeitet' : 'Wissenschaftlicher Artikel';
-      if (processingType === 'book') clearStatus();
+      updateBookWarning();
     });
   });
 
@@ -1237,6 +1217,31 @@
   function clearStatus() {
     statusBox.className = '';
     statusBox.innerHTML = '';
+  }
+
+  function updateBookWarning() {
+    const shouldShow = selectedFile && processingType === 'article' && selectedFile.size > 3 * 1024 * 1024;
+    const isShowingBookWarning = !!statusBox.querySelector('#switch-to-book');
+    if (shouldShow && !isShowingBookWarning) {
+      const sizeMb = (selectedFile.size / 1024 / 1024).toFixed(1);
+      setStatus('info',
+        `Großes Dokument (~${sizeMb} MB). Buch-Modus könnte besser geeignet sein und läuft schneller. ` +
+        `<a href="#" id="switch-to-book" style="color:var(--accent);font-weight:500">→ Zum Buch-Modus wechseln</a>`
+      );
+      setTimeout(() => {
+        const link = document.getElementById('switch-to-book');
+        if (link) link.addEventListener('click', e => {
+          e.preventDefault();
+          document.getElementById('type-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+          document.querySelector('[data-type="book"]').classList.add('active');
+          processingType = 'book';
+          document.getElementById('type-sub-text').textContent = 'Buchkapitel werden einzeln verarbeitet';
+          updateBookWarning();
+        });
+      }, 0);
+    } else if (!shouldShow && isShowingBookWarning) {
+      clearStatus();
+    }
   }
 
   function resetDrop() {
@@ -1897,8 +1902,11 @@
     localStorage.setItem('bkpAuthorVisible', visible ? '1' : '0');
     const btn = document.getElementById('btn-bkp-authors');
     if (btn) btn.textContent = visible ? 'Autoren ✓' : 'Autoren';
+    const list = document.getElementById('bkp-chapter-list');
+    if (list) list.style.setProperty('--bkp-cols',
+      visible ? '20px 56px 56px 1fr 0.6fr 24px' : '20px 56px 56px 1fr 24px');
     document.querySelectorAll('.bkp-author-input').forEach(el => {
-      el.style.display = visible ? 'block' : 'none';
+      el.style.display = visible ? '' : 'none';
     });
   }
 
@@ -1929,8 +1937,10 @@
     document.getElementById('bkp-chapter-list').innerHTML = bookPreviewChapters.map((ch, idx) => {
       if (ch.is_section) {
         return `<div class="bkp-row section">
-          <span style="flex:1">— ${esc(ch.title)} —</span>
-          <span style="margin-left:auto;white-space:nowrap">S. ${ch.page_start}</span>
+          <div style="grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;padding:2px 0">
+            <span>— ${esc(ch.title)} —</span>
+            <span>S. ${ch.page_start}</span>
+          </div>
         </div>`;
       }
       const pageEndVal = ch.page_end != null ? ch.page_end : '';
