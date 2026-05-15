@@ -662,28 +662,11 @@
       </div>
     </div>
 
-    <div class="card">
-      <div class="model-row">
-        <div>
-          <div class="model-label">Modell</div>
-          <div class="model-sub" id="model-sub-text">Automatisch: Ollama wenn verfügbar, sonst Claude</div>
-        </div>
-        <div class="segmented" id="model-toggle">
-          <button data-model="auto" class="active">Auto</button>
-          <button data-model="ollama">Ollama</button>
-          <button data-model="claude">Claude</button>
-        </div>
-      </div>
-      <div class="model-row" style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
-        <div>
-          <div class="model-label">Typ</div>
-          <div class="model-sub" id="type-sub-text">Wissenschaftlicher Artikel</div>
-        </div>
-        <div class="segmented" id="type-toggle">
-          <button data-type="article" class="active">Artikel</button>
-          <button data-type="book">Buch</button>
-        </div>
-      </div>
+    <div class="card" style="padding:16px 28px">
+      <div class="model-label" style="margin-bottom:4px">Modell</div>
+      <div class="model-sub" id="model-sub-text">Automatisch: Ollama wenn verfügbar, sonst Claude</div>
+      <div style="display:none" id="model-toggle"></div>
+      <div style="display:none" id="type-toggle"></div>
     </div>
 
     <div id="progress-stage"></div>
@@ -1027,6 +1010,8 @@
   let savedJobIds = new Set();
   let bookReviewBookId = null;
   let jobStartTimes = {};  // {job_id: Date.now()}
+  let queueDuplicates = {};  // {filename: {exists, existing_file, match_type}}
+  let queueStartTime = 0;
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -1165,6 +1150,21 @@
       if (files.length > 5) showToast(`${files.length} Dateien in der Queue — das kann lange dauern.`);
       showPage('queue');
     }
+    checkQueueDuplicates();
+  }
+
+  async function checkQueueDuplicates() {
+    if (!queueFiles.length) return;
+    try {
+      const r = await fetch(`${API}/check/duplicates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: queueFiles.map(f => ({ pdf_filename: f.file.name })) }),
+      });
+      const data = await r.json();
+      queueDuplicates = data.results || {};
+      renderQueue();
+    } catch {}
   }
 
   // Keep setFile for backward compat (book preview flow)
@@ -1178,32 +1178,7 @@
     return `${(b/1024/1024).toFixed(1)} MB`;
   }
 
-  // Model toggle
-  modelToggle.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      modelToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      selectedModel = btn.dataset.model;
-      const labels = {
-        auto: 'Automatisch: Ollama wenn verfügbar, sonst Claude',
-        ollama: 'Immer Ollama (lokal)',
-        claude: 'Immer Claude API',
-      };
-      modelSubText.textContent = labels[selectedModel];
-    });
-  });
-
-  // Type toggle (Artikel / Buch)
-  document.getElementById('type-toggle').querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.getElementById('type-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      processingType = btn.dataset.type;
-      document.getElementById('type-sub-text').textContent =
-        processingType === 'book' ? 'Buchkapitel werden einzeln verarbeitet' : 'Wissenschaftlicher Artikel';
-      updateBookWarning();
-    });
-  });
+  // Home model/type toggles removed — model is selected per queue on queue screen
 
   // Queue: model toggle
   document.getElementById('queue-model-toggle').querySelectorAll('button').forEach(btn => {
@@ -1237,17 +1212,24 @@
       : books.length === 1 ? 'Zum TOC-Screen' : 'Verarbeiten';
 
     const listEl = document.getElementById('queue-file-list');
-    listEl.innerHTML = queueFiles.map((f, idx) => `
+    listEl.innerHTML = queueFiles.map((f, idx) => {
+      const dup = queueDuplicates[f.file.name];
+      const dupBadge = dup?.exists
+        ? `<span style="color:var(--warning);font-size:11px;flex-shrink:0;white-space:nowrap" title="Bereits verarbeitet: ${esc(dup.existing_file||'')}">⚠ Duplikat</span>`
+        : '';
+      return `
       <div class="queue-row" draggable="true" data-idx="${idx}" data-id="${f.id}">
         <span class="queue-drag-handle" title="Ziehen zum Sortieren">⠿</span>
         <div class="queue-filename" title="${esc(f.file.name)}">${esc(f.file.name)}</div>
+        ${dupBadge}
         <div style="font-size:12px;color:var(--text2);flex-shrink:0">${formatBytes(f.file.size)}</div>
         <div style="display:flex;gap:4px;flex-shrink:0">
           <button class="queue-type-btn ${f.type === 'article' ? 'active' : ''}" data-id="${f.id}" data-type="article">Artikel</button>
           <button class="queue-type-btn ${f.type === 'book' ? 'active' : ''}" data-id="${f.id}" data-type="book">Buch</button>
         </div>
         <button class="queue-del-btn" data-id="${f.id}">×</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     document.querySelectorAll('.queue-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -1306,27 +1288,37 @@
       const data = await r.json();
       if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); btn.disabled = false; return; }
       activeJobs = data.jobs.map(j => ({ ...j, status: 'pending', stage: 'Wartend...', draft: null, error: null }));
-      queueFiles = [];
+      queueFiles = []; queueDuplicates = {};
+      queueStartTime = Date.now();
       showPage('queue-progress');
       renderQueueProgress();
       startQueuePolling();
     } catch { showToast('Backend nicht erreichbar'); btn.disabled = false; }
   });
 
+  function _fmtSec(s) {
+    return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+  }
+
   function renderQueueProgress() {
     const now = Date.now();
     const doneCount = activeJobs.filter(j => j.status === 'done' || j.status === 'error' || j.status === 'cancelled').length;
-    document.getElementById('qp-summary').textContent = `${doneCount}/${activeJobs.length} fertig`;
+    const totalElapsed = queueStartTime ? Math.floor((now - queueStartTime) / 1000) : 0;
+    document.getElementById('qp-summary').textContent =
+      `${doneCount}/${activeJobs.length} fertig` + (queueStartTime ? ` · ${_fmtSec(totalElapsed)}` : '');
     const list = document.getElementById('qp-job-list');
     list.innerHTML = activeJobs.map(j => {
-      const elapsed = j.status === 'processing' && jobStartTimes[j.job_id]
-        ? ` (${Math.floor((now - jobStartTimes[j.job_id]) / 60000)}:${String(Math.floor(((now - jobStartTimes[j.job_id]) / 1000) % 60)).padStart(2,'0')})`
-        : '';
+      let timeStr = '';
+      if (j.status === 'done' && j.elapsed != null) timeStr = ` (${_fmtSec(j.elapsed)})`;
+      else if (j.status === 'processing' && jobStartTimes[j.job_id]) {
+        const s = Math.floor((now - jobStartTimes[j.job_id]) / 1000);
+        timeStr = ` (${_fmtSec(s)})`;
+      }
       const canCancel = j.status === 'pending' || j.status === 'processing';
       return `<div class="qp-job-row">
         <div class="qp-status-dot ${j.status}"></div>
         <div class="qp-filename" title="${esc(j.filename)}">${esc(j.filename)}</div>
-        <div style="font-size:12px;color:var(--text2);flex:1">${esc(j.stage || '')}${elapsed}</div>
+        <div style="font-size:12px;color:var(--text2);flex:1">${esc(j.stage || '')}${timeStr}</div>
         ${canCancel ? `<button class="queue-del-btn" style="font-size:14px" onclick="cancelQueueJob('${j.job_id}')">×</button>` : ''}
       </div>`;
     }).join('');
@@ -1354,6 +1346,7 @@
           if (lj) {
             if (sj.status === 'processing' && !jobStartTimes[sj.job_id]) jobStartTimes[sj.job_id] = Date.now();
             lj.status = sj.status; lj.stage = sj.stage; lj.error = sj.error;
+            if (sj.elapsed != null) lj.elapsed = sj.elapsed;
             if (sj.draft_summary) lj.draft = sj.draft_summary;
           }
         }

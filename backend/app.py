@@ -1234,6 +1234,10 @@ class DuplicateCheckRequest(BaseModel):
     pdf_filename: str
 
 
+class BatchDuplicateCheckRequest(BaseModel):
+    files: list[dict]  # [{pdf_filename: str}]
+
+
 class BookReparseRequest(BaseModel):
     pdf_id: str
     page_range: str | None = None
@@ -1261,7 +1265,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "3.0.1"
+MNEME_VERSION = "3.0.2"
 
 
 @app.get("/version")
@@ -1269,40 +1273,62 @@ def get_version():
     return {"version": MNEME_VERSION}
 
 
+def _build_vault_source_map(vault_path: str) -> dict[str, tuple[str, str]]:
+    """Scan vault once and build {source_pdf_lower → (rel_path, title_lower)} map."""
+    result: dict[str, tuple[str, str]] = {}
+    vault = Path(vault_path)
+    candidates = list(vault.glob("*.md"))
+    bucher = vault / "Bücher"
+    if bucher.is_dir():
+        candidates.extend(bucher.rglob("*.md"))
+    for md_file in candidates:
+        try:
+            lines = md_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
+            src_val = title_val = ""
+            for line in lines:
+                ls = line.strip().lower()
+                if ls.startswith("source_pdf:") and not src_val:
+                    src_val = line.split(":", 1)[1].strip().strip("'\"").lower()
+                if ls.startswith("title:") and not title_val:
+                    title_val = line.split(":", 1)[1].strip().strip("'\"").lower()
+            if src_val:
+                rel = str(md_file.relative_to(vault))
+                result[src_val] = (rel, title_val)
+        except Exception:
+            pass
+    return result
+
+
 @app.post("/check/duplicate")
 def check_duplicate(req: DuplicateCheckRequest):
-    """Check if a PDF was already processed by matching source_pdf in existing notes."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
     if not vault_path or not Path(vault_path).is_dir():
-        return {"exists": False, "existing_file": None}
+        return {"exists": False, "existing_file": None, "match_type": None}
+    src_map = _build_vault_source_map(vault_path)
     target = req.pdf_filename.strip().lower()
-    vault = Path(vault_path)
-    # Search vault root .md files for matching source_pdf (only first 30 lines, fast)
-    for md_file in vault.glob("*.md"):
-        try:
-            lines = md_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
-            for line in lines:
-                if line.strip().lower().startswith("source_pdf:"):
-                    val = line.split(":", 1)[1].strip().strip("'\"")
-                    if val.lower() == target:
-                        return {"exists": True, "existing_file": md_file.name}
-        except Exception:
-            pass
-    # Also check Bücher/ subdirectories for book-mode notes
-    bucher_dir = vault / "Bücher"
-    if bucher_dir.is_dir():
-        for md_file in bucher_dir.rglob("*.md"):
-            try:
-                lines = md_file.read_text(encoding="utf-8", errors="ignore").splitlines()[:30]
-                for line in lines:
-                    if line.strip().lower().startswith("source_pdf:"):
-                        val = line.split(":", 1)[1].strip().strip("'\"")
-                        if val.lower() == target:
-                            return {"exists": True, "existing_file": str(md_file.relative_to(vault))}
-            except Exception:
-                pass
-    return {"exists": False, "existing_file": None}
+    if target in src_map:
+        return {"exists": True, "existing_file": src_map[target][0], "match_type": "source_pdf"}
+    return {"exists": False, "existing_file": None, "match_type": None}
+
+
+@app.post("/check/duplicates")
+def check_duplicates_batch(req: BatchDuplicateCheckRequest):
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    empty = {"exists": False, "existing_file": None, "match_type": None}
+    if not vault_path or not Path(vault_path).is_dir():
+        return {"results": {f.get("pdf_filename", ""): empty for f in req.files}}
+    src_map = _build_vault_source_map(vault_path)
+    results = {}
+    for f in req.files:
+        filename = f.get("pdf_filename", "")
+        target = filename.strip().lower()
+        if target in src_map:
+            results[filename] = {"exists": True, "existing_file": src_map[target][0], "match_type": "source_pdf"}
+        else:
+            results[filename] = empty
+    return {"results": results}
 
 
 @app.get("/last_run_cost")
@@ -1560,22 +1586,36 @@ def confirm_process(req: ConfirmRequest):
 
 
 async def _process_queue_job(job_id: str, pdf_bytes: bytes, filename: str, model: str):
+    import time
     global _queue_jobs, _cancel_flags
     if job_id in _cancel_flags:
         _queue_jobs[job_id]["status"] = "cancelled"
+        _queue_jobs[job_id]["stage"] = "Abgebrochen"
         _cancel_flags.discard(job_id)
         return
+    t0 = time.time()
+
+    def _stage_cb(s: str):
+        if job_id in _queue_jobs:
+            _queue_jobs[job_id]["stage"] = s
+
     _queue_jobs[job_id]["status"] = "processing"
     _queue_jobs[job_id]["stage"] = "Verarbeitung läuft..."
     try:
-        draft = await _process_pdf_bytes(pdf_bytes, filename, model)
+        draft = await _process_pdf_bytes(pdf_bytes, filename, model,
+                                          stage_callback=_stage_cb, cancel_job_id=job_id)
         _queue_jobs[job_id]["status"] = "done"
         _queue_jobs[job_id]["draft"] = draft
+        _queue_jobs[job_id]["elapsed"] = round(time.time() - t0)
         _queue_jobs[job_id]["stage"] = "Fertig"
     except HTTPException as e:
-        _queue_jobs[job_id]["status"] = "error"
-        _queue_jobs[job_id]["error"] = str(e.detail)
-        _queue_jobs[job_id]["stage"] = f"Fehler: {e.detail}"
+        if e.detail == "cancelled_by_user":
+            _queue_jobs[job_id]["status"] = "cancelled"
+            _queue_jobs[job_id]["stage"] = "Abgebrochen"
+        else:
+            _queue_jobs[job_id]["status"] = "error"
+            _queue_jobs[job_id]["error"] = str(e.detail)
+            _queue_jobs[job_id]["stage"] = f"Fehler: {e.detail}"
     except Exception as e:
         _queue_jobs[job_id]["status"] = "error"
         _queue_jobs[job_id]["error"] = str(e)
@@ -1614,6 +1654,7 @@ def get_queue_status():
             "status": job["status"],
             "stage": job.get("stage", ""),
             "error": job.get("error"),
+            "elapsed": job.get("elapsed"),
             "draft_summary": {
                 "filename": d["output_filename"],
                 "tokens": d["token_list"],
@@ -2632,7 +2673,9 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
                               stage_prefix: str = "",
                               full_text_override: str | None = None,
                               extra_cached_terms: dict | None = None,
-                              meta_override: dict | None = None) -> dict:
+                              meta_override: dict | None = None,
+                              stage_callback=None,
+                              cancel_job_id: str | None = None) -> dict:
     """Core processing. Returns a complete draft dict ready for review or bulk confirm."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
@@ -2664,6 +2707,13 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     def _stage(s: str, p: float):
         _processing_status["stage"] = f"{stage_prefix}{s}"
         _processing_status["progress"] = p
+        if stage_callback:
+            stage_callback(s)
+
+    def _check_cancel():
+        if cancel_job_id and cancel_job_id in _cancel_flags:
+            _cancel_flags.discard(cancel_job_id)
+            raise HTTPException(status_code=499, detail="cancelled_by_user")
 
     _stage("Vault wird gescannt...", 0.10)
     vault_links = extract_wikilinks(vault_path)
@@ -2738,6 +2788,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
                    for i in range(0, chunks_count, OLLAMA_BATCH_SIZE)]
         n_batches = len(batched)
         for bi, batch_chunk in enumerate(batched):
+            _check_cancel()
             _stage(f"Batch {bi + 1}/{n_batches} — Ollama...", 0.15 + 0.38 * (bi / max(n_batches, 1)))
             _processing_status["chunk_current"] = min((bi + 1) * OLLAMA_BATCH_SIZE, chunks_count)
             raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(batch_chunk))
@@ -2780,6 +2831,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
                    for i in range(0, chunks_count, OLLAMA_BATCH_SIZE)]
         n_batches = len(batched)
         for bi, batch_chunk in enumerate(batched):
+            _check_cancel()
             _stage(f"Batch {bi + 1}/{n_batches} — Ollama...", 0.15 + 0.65 * (bi / max(n_batches, 1)))
             _processing_status["chunk_current"] = min((bi + 1) * OLLAMA_BATCH_SIZE, chunks_count)
             raw = await call_ollama(ollama_model, build_recognition_prompt_ollama(batch_chunk))
@@ -2807,6 +2859,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
         _processing_status["chunk_total"] = chunks_count
         term_lists = []
         for i, chunk in enumerate(p1_chunks):
+            _check_cancel()
             _stage(f"Chunk {i + 1}/{chunks_count} — Claude...", 0.15 + 0.65 * (i / chunks_count))
             _processing_status["chunk_current"] = i + 1
             try:
