@@ -887,6 +887,9 @@
         <button class="btn-secondary" id="btn-fix-dataview-query" style="font-size:13px;padding:8px 14px">
           Dataview-Queries reparieren
         </button>
+        <button class="btn-secondary" id="btn-vault-relink" style="font-size:13px;padding:8px 14px">
+          Vault neu verlinken
+        </button>
         <button class="btn-danger" id="btn-vault-reset" style="font-size:13px;padding:8px 14px">
           Vault Reset
         </button>
@@ -1509,6 +1512,44 @@
     } catch { showToast('Backend nicht erreichbar'); }
   });
 
+  let _relinkPollTimer = null;
+  document.getElementById('btn-vault-relink').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-vault-relink');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = 'Starte…';
+    try {
+      const r = await fetch(`${API}/vault/relink`, { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json();
+        showToast(`Fehler: ${d.detail || r.statusText}`);
+        btn.disabled = false;
+        btn.textContent = 'Vault neu verlinken';
+        return;
+      }
+      _relinkPollTimer = setInterval(async () => {
+        try {
+          const sr = await fetch(`${API}/vault/relink/status`);
+          const s = await sr.json();
+          if (s.active) {
+            btn.textContent = `${s.checked}/${s.total} Dateien…`;
+          } else {
+            clearInterval(_relinkPollTimer);
+            btn.disabled = false;
+            btn.textContent = 'Vault neu verlinken';
+            if (s.total > 0) {
+              showToast(`Relinking abgeschlossen: ${s.updated} von ${s.total} Dateien aktualisiert (${s.elapsed_s}s)`);
+            }
+          }
+        } catch { clearInterval(_relinkPollTimer); btn.disabled = false; btn.textContent = 'Vault neu verlinken'; }
+      }, 1000);
+    } catch {
+      showToast('Backend nicht erreichbar');
+      btn.disabled = false;
+      btn.textContent = 'Vault neu verlinken';
+    }
+  });
+
   // Jobs page
   async function loadJobsPage() {
     document.getElementById('jobs-list').innerHTML = '<div class="job-empty">Lade…</div>';
@@ -1949,7 +1990,7 @@
         <input type="checkbox" ${ch.enabled ? 'checked' : ''} onchange="bkpToggle(${idx},this.checked)">
         <input type="text" class="bkp-page-input" value="${ch.page_start}" oninput="bkpSetPage(${idx},this.value)" title="Von">
         <input type="text" class="bkp-end-input" value="${pageEndVal}" oninput="bkpSetPageEnd(${idx},this.value)" title="Bis">
-        <input type="text" class="bkp-title-input" value="${esc(ch.title)}" oninput="bkpSetTitle(${idx},this.value)" placeholder="Titel">
+        <input type="text" class="bkp-title-input" value="${esc(ch.title)}" oninput="bkpSetTitle(${idx},this.value)" placeholder="Titel" title="${esc(ch.title)}">
         <input type="text" class="bkp-author-input" value="${esc(ch.author||'')}" oninput="bkpSetAuthor(${idx},this.value)" placeholder="Autor (optional)" style="display:${authorDisplay}">
       </div>`;
     }).join('');

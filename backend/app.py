@@ -14,7 +14,7 @@ import anthropic
 import fitz  # pymupdf
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -1007,7 +1007,7 @@ def parse_toc_regex(toc_text: str) -> list[dict]:
 
 
 def derive_chapter_filename(chapter_num: int, chapter_title: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()[:40]
+    safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()[:80]
     safe = re.sub(r'\s+', '-', safe)
     return f"{chapter_num:02d}-{safe}.md"
 
@@ -1243,7 +1243,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.9"
+MNEME_VERSION = "2.9.10"
 
 
 @app.get("/version")
@@ -1745,7 +1745,11 @@ async def process_book_run_dry(req: BookRunRequest):
             _processing_status["progress"] = 0.10 + 0.82 * (i / n)
             _processing_status["chunk_current"] = chapter_num
             await asyncio.sleep(0.5)
-            author_field = f"author: {chapter_author}\n" if chapter_author else ""
+            if chapter_author:
+                author_normalized = ", ".join(parse_author_list(chapter_author))
+                author_field = f"author: {author_normalized}\n"
+            else:
+                author_field = ""
             chapter_filename = derive_chapter_filename(chapter_num, chapter_title)
             frontmatter = (
                 f"---\ntitle: {yaml_str(chapter_title)}\n{author_field}chapter: {chapter_num}\n"
@@ -1848,7 +1852,11 @@ async def _execute_book_chapters(
             )
             overview_link = f"Bücher/{folder_name}/00-Uebersicht"
             book_title_safe = book_meta.get("title", "").replace('"', "'")
-            author_field = f"author: {chapter_author}\n" if chapter_author else ""
+            if chapter_author:
+                author_normalized = ", ".join(parse_author_list(chapter_author))
+                author_field = f"author: {author_normalized}\n"
+            else:
+                author_field = ""
             chapter_frontmatter = (
                 f"---\ntitle: {yaml_str(chapter_title)}\n{author_field}chapter: {chapter_num}\n"
                 f'book: "[[{overview_link}|{book_title_safe}]]"\n'
@@ -2127,6 +2135,61 @@ def vault_reset():
         deleted_files += 1
     logger.info("VAULT RESET: %d Ordner, %d Dateien gelöscht", deleted_dirs, deleted_files)
     return {"ok": True, "deleted_dirs": deleted_dirs, "deleted_files": deleted_files}
+
+
+_relink_status: dict = {"active": False, "checked": 0, "total": 0, "updated": 0, "elapsed_s": 0}
+
+
+@app.get("/vault/relink/status")
+def vault_relink_status():
+    return _relink_status
+
+
+@app.post("/vault/relink")
+def vault_relink_start(background_tasks: BackgroundTasks):
+    global _relink_status
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    if _relink_status.get("active"):
+        raise HTTPException(status_code=409, detail="relink_already_running")
+    background_tasks.add_task(_run_relink, vault_path)
+    return {"status": "started"}
+
+
+def _run_relink(vault_path: str):
+    import time
+    global _relink_status
+    t0 = time.time()
+    _relink_status = {"active": True, "checked": 0, "total": 0, "updated": 0, "elapsed_s": 0}
+    try:
+        cache = load_token_cache(vault_path)
+        if not cache:
+            return
+        terms = [{"canonical": k, **v} for k, v in cache.items()]
+        vault = Path(vault_path)
+        files: list[Path] = list(vault.glob("*.md"))
+        bucher = vault / "Bücher"
+        if bucher.is_dir():
+            files.extend(bucher.rglob("*.md"))
+        _relink_status["total"] = len(files)
+        updated = 0
+        for f in files:
+            try:
+                content = f.read_text(encoding="utf-8")
+                new_content = apply_wikilinks(content, terms)
+                if new_content != content:
+                    f.write_text(new_content, encoding="utf-8")
+                    updated += 1
+            except Exception as e:
+                logger.warning("Relink: %s — %s", f.name, e)
+            _relink_status["checked"] += 1
+        _relink_status["updated"] = updated
+        _relink_status["elapsed_s"] = round(time.time() - t0, 1)
+        logger.info("VAULT RELINK: %d geprüft, %d aktualisiert", len(files), updated)
+    finally:
+        _relink_status["active"] = False
 
 
 @app.post("/tokens/migrate")
