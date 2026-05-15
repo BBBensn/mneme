@@ -68,6 +68,9 @@ _processing_status: dict = {"active": False, "stage": "", "progress": 0.0,
 _pending_draft: dict | None = None
 _pending_bulk: dict | None = None
 _pending_book_pdf: dict[str, dict] = {}  # pdf_id → {"bytes": bytes, "filename": str}
+_queue_jobs: dict[str, dict] = {}  # job_id → {status, filename, draft, error, stage}
+_pending_book_drafts: dict[str, dict] = {}  # book_id → {folder_name, book_meta, pdf_filename, vault_path, job_ids}
+_cancel_flags: set[str] = set()  # job_ids marked for cancellation
 
 _IMPRINT_BLACKLIST = frozenset({
     "abonnement", "anzeigen", "verlag", "issn", "doi", "isbn", "druck",
@@ -1212,6 +1215,21 @@ class BulkConfirmRequest(BaseModel):
     merged_terms: list[dict] = []
 
 
+class QueueConfirmRequest(BaseModel):
+    job_id: str
+    selected_terms: list[str]
+    merged_terms: list[dict] = []
+    meta_override: dict = {}
+
+
+class BookFinalizeRequest(BaseModel):
+    book_id: str
+
+
+class CancelJobRequest(BaseModel):
+    job_id: str
+
+
 class DuplicateCheckRequest(BaseModel):
     pdf_filename: str
 
@@ -1243,7 +1261,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.13"
+MNEME_VERSION = "3.0.1"
 
 
 @app.get("/version")
@@ -1541,6 +1559,196 @@ def confirm_process(req: ConfirmRequest):
     }
 
 
+async def _process_queue_job(job_id: str, pdf_bytes: bytes, filename: str, model: str):
+    global _queue_jobs, _cancel_flags
+    if job_id in _cancel_flags:
+        _queue_jobs[job_id]["status"] = "cancelled"
+        _cancel_flags.discard(job_id)
+        return
+    _queue_jobs[job_id]["status"] = "processing"
+    _queue_jobs[job_id]["stage"] = "Verarbeitung läuft..."
+    try:
+        draft = await _process_pdf_bytes(pdf_bytes, filename, model)
+        _queue_jobs[job_id]["status"] = "done"
+        _queue_jobs[job_id]["draft"] = draft
+        _queue_jobs[job_id]["stage"] = "Fertig"
+    except HTTPException as e:
+        _queue_jobs[job_id]["status"] = "error"
+        _queue_jobs[job_id]["error"] = str(e.detail)
+        _queue_jobs[job_id]["stage"] = f"Fehler: {e.detail}"
+    except Exception as e:
+        _queue_jobs[job_id]["status"] = "error"
+        _queue_jobs[job_id]["error"] = str(e)
+        _queue_jobs[job_id]["stage"] = "Fehler"
+    finally:
+        _cancel_flags.discard(job_id)
+
+
+@app.post("/process/queue")
+async def start_queue_processing(files: list[UploadFile] = File(...), model: str = "auto"):
+    # Parallel tasks — Ollama serializes internally due to single-GPU constraint
+    cfg = load_config()
+    vault_path = cfg.get("vault_path", "")
+    if not vault_path or not Path(vault_path).is_dir():
+        raise HTTPException(status_code=400, detail="vault_path_not_set")
+    jobs = []
+    for f in files:
+        job_id = str(uuid.uuid4())[:12]
+        pdf_bytes = await f.read()
+        filename = f.filename or f"{job_id}.pdf"
+        _queue_jobs[job_id] = {"status": "pending", "filename": filename,
+                               "draft": None, "error": None, "stage": "Wartend..."}
+        asyncio.create_task(_process_queue_job(job_id, pdf_bytes, filename, model))
+        jobs.append({"job_id": job_id, "filename": filename})
+    return {"jobs": jobs}
+
+
+@app.get("/process/queue/status")
+def get_queue_status():
+    result = []
+    for jid, job in _queue_jobs.items():
+        d = job["draft"]
+        result.append({
+            "job_id": jid,
+            "filename": job["filename"],
+            "status": job["status"],
+            "stage": job.get("stage", ""),
+            "error": job.get("error"),
+            "draft_summary": {
+                "filename": d["output_filename"],
+                "tokens": d["token_list"],
+                "stats": d["stats"],
+                "cost": d["cost"],
+                "meta": d.get("meta", {}),
+                "content": d.get("preview_content", ""),
+                "duplicate_suggestions": d.get("duplicate_suggestions", []),
+            } if d else None,
+        })
+    return {"jobs": result}
+
+
+@app.post("/process/queue/cancel")
+def cancel_queue_job(req: CancelJobRequest):
+    global _cancel_flags
+    job = _queue_jobs.get(req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    if job["status"] == "pending":
+        job["status"] = "cancelled"
+        job["stage"] = "Abgebrochen"
+    elif job["status"] == "processing":
+        _cancel_flags.add(req.job_id)
+        job["stage"] = "Wird abgebrochen..."
+    return {"cancelled": True}
+
+
+@app.post("/process/book/finalize")
+def finalize_book(req: BookFinalizeRequest):
+    book_data = _pending_book_drafts.get(req.book_id)
+    if not book_data:
+        raise HTTPException(status_code=404, detail="book_not_found")
+    vault_path = book_data["vault_path"]
+    folder_name = book_data["folder_name"]
+    book_meta = book_data["book_meta"]
+    pdf_filename = book_data["pdf_filename"]
+    book_dir = Path(vault_path) / "Bücher" / folder_name
+    book_dir.mkdir(parents=True, exist_ok=True)
+    _write_book_overview(book_dir, book_meta, folder_name, pdf_filename)
+    for jid in book_data.get("job_ids", []):
+        _queue_jobs.pop(jid, None)
+    del _pending_book_drafts[req.book_id]
+    logger.info("BUCH FINALIZED: %s", folder_name)
+    return {"ok": True, "folder": folder_name}
+
+
+@app.post("/process/queue/confirm")
+def confirm_queue_job(req: QueueConfirmRequest):
+    global _queue_jobs
+    if req.job_id not in _queue_jobs:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    job = _queue_jobs[req.job_id]
+    if job["status"] != "done" or not job["draft"]:
+        raise HTTPException(status_code=400, detail="job_not_ready")
+    draft = job["draft"]
+
+    if req.meta_override:
+        meta = draft.setdefault("meta", {})
+        for field, value in req.meta_override.items():
+            if value and field in ("title", "author", "year"):
+                meta[field] = value
+                draft["frontmatter"] = re.sub(
+                    rf'^{re.escape(field)}:.*$', f'{field}: {yaml_str(str(value))}',
+                    draft["frontmatter"], flags=re.MULTILINE,
+                )
+        if req.meta_override.get("title"):
+            draft["output_filename"] = derive_output_filename(meta, draft.get("source_pdf", "document.pdf"))
+
+    vault_path = draft["vault_path"]
+    selected_set = set(req.selected_terms)
+    selected_new = [t for t in draft["new_terms"] if t["canonical"] in selected_set]
+    for merge in req.merged_terms:
+        keep_c, remove_c = merge.get("keep"), merge.get("remove")
+        if not keep_c or not remove_c:
+            continue
+        keep_term = next((t for t in selected_new if t["canonical"] == keep_c), None)
+        if keep_term:
+            remove_term = next((t for t in draft["new_terms"] if t["canonical"] == remove_c), None)
+            if remove_term:
+                keep_term["aliases"] = sorted(set(keep_term.get("aliases", [])) | set(remove_term.get("aliases", [])) | {remove_c})
+        selected_new = [t for t in selected_new if t["canonical"] != remove_c]
+
+    final_terms = merge_terms([draft["cached_terms"], selected_new], draft["base_links"], draft["vault_links"], draft["full_text"])
+    body = draft.get("sections_text", draft["full_text"])
+    content = apply_wikilinks(draft["frontmatter"] + body, final_terms)
+    total_links = len(re.findall(r"\[\[.+?\]\]", content))
+    output_filename = draft["output_filename"]
+
+    draft_meta = draft.get("meta", {})
+    author_str_d = draft_meta.get("author", "")
+    if author_str_d:
+        work_info = {"title": draft_meta.get("title", ""), "year": draft_meta.get("year", ""),
+                     "file": output_filename.replace(".md", ""), "doi": draft_meta.get("doi", "")}
+        for a in (parse_author_list(author_str_d) or [author_str_d]):
+            update_author_stub(vault_path, a, work_info, draft_meta.get("affiliation", ""))
+
+    out_path = Path(vault_path) / output_filename
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(content, encoding="utf-8")
+    save_token_cache(vault_path, selected_new)
+
+    if req.merged_terms:
+        tok_path = Path(vault_path) / TOKENS_FILENAME
+        try:
+            data = json.loads(tok_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        for merge in req.merged_terms:
+            keep_c, remove_c = merge.get("keep"), merge.get("remove")
+            if keep_c in data and remove_c in data:
+                data[keep_c] = sorted(set(data.get(keep_c, [])) | set(data.get(remove_c, [])) | {remove_c})
+                del data[remove_c]
+                rename_wikilinks_in_vault(vault_path, remove_c, keep_c)
+        tok_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    term_types = {t["canonical"]: t.get("type") for t in selected_new}
+    found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', content))
+    stubs_created, _ = create_stubs(vault_path, found_links, output_filename, term_types)
+    cost_info = draft.get("cost", {})
+    cost_eur = round(
+        (cost_info.get("input_tokens", 0) * HAIKU_PRICE_INPUT_PER_TOKEN +
+         cost_info.get("output_tokens", 0) * HAIKU_PRICE_OUTPUT_PER_TOKEN +
+         cost_info.get("cache_read_tokens", 0) * HAIKU_PRICE_CACHE_READ_PER_TOKEN +
+         cost_info.get("cache_creation_tokens", 0) * HAIKU_PRICE_CACHE_WRITE_PER_TOKEN) * EUR_RATE, 5)
+    log_job({"timestamp": datetime.datetime.now().isoformat(timespec="seconds"), "filename": output_filename,
+             "source_pdf": draft.get("source_pdf", ""), "model": draft.get("stats", {}).get("model_used", ""),
+             "links": total_links, "new_tokens": len(selected_new),
+             "elapsed_s": draft.get("process_elapsed_s", 0), "cost_eur": cost_eur, "status": "ok"})
+    logger.info("QUEUE CONFIRMED: %d links | %d stubs | %s", total_links, stubs_created, output_filename)
+    del _queue_jobs[req.job_id]
+    return {"ok": True, "filename": output_filename, "wikilinks_total": total_links,
+            "stubs_created": stubs_created, "model_used": draft.get("stats", {}).get("model_used", "")}
+
+
 @app.post("/process/quality_pass")
 def quality_pass(req: QualityPassRequest):
     cfg = load_config()
@@ -1681,23 +1889,27 @@ async def process_book_run(req: BookRunRequest):
         _processing_status["progress"] = 0.08
         chapters_with_pages = find_chapter_boundaries(doc, active)
 
-        processed_chapters, errors = await _execute_book_chapters(
+        chapter_summaries, errors = await _execute_book_chapters(
             doc, chapters_with_pages, book_meta, pdf_filename, req.model, vault_path, folder_name,
         )
         doc.close()
 
-        _processing_status["stage"] = "Übersicht wird erstellt..."
-        _processing_status["progress"] = 0.96
-        book_dir = Path(vault_path) / "Bücher" / folder_name
-        _write_book_overview(book_dir, book_meta, folder_name, pdf_filename)
-
+        book_id = str(uuid.uuid4())[:12]
+        _pending_book_drafts[book_id] = {
+            "folder_name": folder_name, "book_meta": book_meta,
+            "pdf_filename": pdf_filename, "vault_path": vault_path,
+            "job_ids": [c["job_id"] for c in chapter_summaries],
+        }
         del _pending_book_pdf[req.pdf_id]
-        logger.info("BUCH RUN FERTIG: %d Kapitel | %d Fehler | %s",
-                    len(processed_chapters), len(errors), folder_name)
+        logger.info("BUCH RUN REVIEW-READY: %d Kapitel | %d Fehler | %s",
+                    len(chapter_summaries), len(errors), folder_name)
         return {
-            "status": "book_ready", "folder": folder_name,
+            "status": "book_review_ready",
+            "book_id": book_id,
+            "folder": folder_name,
             "book_title": book_meta.get("title", ""),
-            "chapters": processed_chapters, "errors": errors,
+            "chapters": chapter_summaries,
+            "errors": errors,
         }
     finally:
         _processing_status["active"] = False
@@ -1813,14 +2025,15 @@ async def _execute_book_chapters(
     doc, chapters_with_pages: list[dict], book_meta: dict,
     pdf_filename: str, model: str, vault_path: str, folder_name: str,
 ) -> tuple[list[dict], list[dict]]:
-    """Process chapters, write .md files, return (processed_chapters, errors)."""
+    """Process chapters, store drafts in _queue_jobs for review, return (chapter_summaries, errors)."""
+    global _queue_jobs
     n = len(chapters_with_pages)
     _processing_status["chunk_total"] = n
-    processed_chapters: list[dict] = []
+    chapter_summaries: list[dict] = []
     errors: list[dict] = []
     accumulated_terms: dict[str, dict] = {}
-    book_dir = Path(vault_path) / "Bücher" / folder_name
-    book_dir.mkdir(parents=True, exist_ok=True)
+    overview_link = f"Bücher/{folder_name}/00-Uebersicht"
+    book_title_safe = book_meta.get("title", "").replace('"', "'")
 
     for i, chapter in enumerate(chapters_with_pages):
         chapter_num = chapter.get("chapter", i + 1)
@@ -1842,6 +2055,7 @@ async def _execute_book_chapters(
         _processing_status["chunk_current"] = chapter_num
 
         chapter_filename = derive_chapter_filename(chapter_num, chapter_title)
+        chapter_rel_path = f"Bücher/{folder_name}/{chapter_filename}"
         try:
             draft = await _process_pdf_bytes(
                 None, chapter_filename, model,
@@ -1850,14 +2064,13 @@ async def _execute_book_chapters(
                 extra_cached_terms=accumulated_terms,
                 meta_override={"author": chapter_author} if chapter_author else None,
             )
-            overview_link = f"Bücher/{folder_name}/00-Uebersicht"
-            book_title_safe = book_meta.get("title", "").replace('"', "'")
+            # Build book chapter frontmatter (overrides article frontmatter in draft)
             if chapter_author:
                 author_normalized = ", ".join(parse_author_list(chapter_author))
                 author_field = f"author: {author_normalized}\n"
             else:
                 author_field = ""
-            chapter_frontmatter = (
+            draft["frontmatter"] = (
                 f"---\ntitle: {yaml_str(chapter_title)}\n{author_field}chapter: {chapter_num}\n"
                 f'book: "[[{overview_link}|{book_title_safe}]]"\n'
                 f"tags:\n  - book-chapter\n"
@@ -1865,13 +2078,8 @@ async def _execute_book_chapters(
                 f"mneme_version: {MNEME_VERSION}\n---\n\n"
                 f"> Teil von [[{overview_link}|{book_title_safe}]]\n\n"
             )
-            final_terms = merge_terms(
-                [draft["cached_terms"], draft["new_terms"]],
-                draft["base_links"], draft["vault_links"], draft["full_text"],
-            )
-            chapter_body = apply_wikilinks(draft["sections_text"], final_terms)
-            (book_dir / chapter_filename).write_text(chapter_frontmatter + chapter_body, encoding="utf-8")
-            save_token_cache(vault_path, draft["new_terms"])
+            draft["output_filename"] = chapter_rel_path
+            # Accumulate terms for subsequent chapters
             for term in draft["new_terms"]:
                 c = term["canonical"]
                 if c not in accumulated_terms:
@@ -1881,20 +2089,27 @@ async def _execute_book_chapters(
                         "translations": term.get("translations", {}),
                         "forms": term.get("aliases", [c]),
                     }
-            found_links = set(re.findall(r'\[\[([^\[\]|#]+?)(?:\|[^\[\]]+?)?\]\]', chapter_body))
-            term_types = {t["canonical"]: t.get("type") for t in draft["new_terms"]}
-            create_stubs(vault_path, found_links, chapter_filename, term_types)
-            chapter_links = len(re.findall(r'\[\[.+?\]\]', chapter_body))
-            processed_chapters.append({
-                "chapter": chapter_num, "title": chapter_title,
-                "filename": chapter_filename, "author": chapter_author,
-                "links": chapter_links, "new_terms": len(draft["new_terms"]),
+            # Register draft in queue_jobs so /process/queue/confirm handles it
+            job_id = str(uuid.uuid4())[:12]
+            _queue_jobs[job_id] = {"status": "done", "filename": chapter_filename, "draft": draft,
+                                   "error": None, "stage": "Fertig"}
+            chapter_summaries.append({
+                "job_id": job_id,
+                "chapter_num": chapter_num,
+                "title": chapter_title,
+                "author": chapter_author,
+                "filename": chapter_filename,
+                "tokens": draft["token_list"],
+                "stats": draft["stats"],
+                "cost": draft["cost"],
+                "meta": draft.get("meta", {}),
+                "content": draft.get("preview_content", ""),
             })
         except Exception as e:
             logger.warning("Kapitel %d fehlgeschlagen: %s", chapter_num, e, exc_info=True)
             errors.append({"chapter": chapter_num, "title": chapter_title, "error": str(e)})
 
-    return processed_chapters, errors
+    return chapter_summaries, errors
 
 
 async def _process_book_inner(file: UploadFile, model: str) -> dict:

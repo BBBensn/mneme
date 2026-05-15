@@ -445,6 +445,28 @@
     .bkp-title-input, .bkp-author-input { width:100%; padding:4px 8px; font-size:13px; border:1px solid #e0e0e0; border-radius:6px; color:var(--text); background:var(--surface); }
     .bkp-type-badge { font-size:11px; padding:1px 6px; border-radius:8px; background:rgba(255,159,10,0.12); color:#7a4a00; white-space:nowrap; }
 
+    /* Queue page */
+    .queue-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); }
+    .queue-row:last-child { border-bottom:none; }
+    .queue-filename { flex:1; min-width:0; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .queue-type-btn { padding:4px 10px; font-size:12px; border:1px solid var(--border); background:var(--surface2); cursor:pointer; border-radius:4px; }
+    .queue-type-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .queue-del-btn { background:none; border:none; cursor:pointer; color:var(--text2); padding:4px 6px; font-size:18px; flex-shrink:0; }
+    .queue-del-btn:hover { color:var(--danger); }
+
+    /* Queue progress */
+    .qp-job-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }
+    .qp-job-row:last-child { border-bottom:none; }
+    .qp-status-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; background:var(--border); }
+    .qp-status-dot.processing { background:var(--warning); }
+    .qp-status-dot.done { background:var(--success); }
+    .qp-status-dot.error { background:var(--danger); }
+    .qp-status-dot.cancelled { background:var(--border); }
+    .qp-filename { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    /* Drag handle */
+    .queue-drag-handle { cursor:grab; color:var(--text2); padding:0 4px; user-select:none; flex-shrink:0; }
+    .queue-row.drag-over { border-top:2px solid var(--accent); }
+
     /* Bulk page */
     .pdf-row {
       display: flex;
@@ -608,7 +630,7 @@
         <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
       </svg>
     </button>
-    <button class="btn-icon hidden" id="btn-home" title="Home">
+    <button class="btn-icon" id="btn-home" title="Home">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
         <polyline points="9 22 9 12 15 12 15 22"/>
@@ -628,7 +650,7 @@
 
     <div class="card">
       <div id="drop-zone">
-        <input type="file" id="file-input" accept=".pdf" />
+        <input type="file" id="file-input" accept=".pdf" multiple />
         <div class="drop-icon">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -835,29 +857,109 @@
 
   </div>
 
-  <!-- Review page -->
+  <!-- Queue page -->
+  <div class="page" id="page-queue">
+    <div class="card">
+      <div style="margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:4px">Verarbeitungs-Queue</div>
+        <div id="queue-subtitle" style="font-size:13px;color:var(--text2)"></div>
+      </div>
+      <div id="queue-file-list"></div>
+    </div>
+    <div class="card">
+      <div class="model-row">
+        <div>
+          <div class="model-label">Modell</div>
+          <div class="model-sub" id="queue-model-sub">Automatisch: Ollama wenn verfügbar, sonst Claude</div>
+        </div>
+        <div class="segmented" id="queue-model-toggle">
+          <button data-model="auto" class="active">Auto</button>
+          <button data-model="ollama">Ollama</button>
+          <button data-model="claude">Claude</button>
+        </div>
+      </div>
+    </div>
+    <div id="queue-warning" style="display:none;padding:12px 16px;background:rgba(255,159,10,0.10);border-radius:var(--radius-sm);font-size:13px;color:#7a4a00;border:1px solid rgba(255,159,10,0.3)"></div>
+    <div style="display:flex;gap:12px">
+      <button class="btn-secondary" id="btn-queue-back">← Zurück</button>
+      <button class="btn-primary" id="btn-queue-run" style="flex:1" disabled>Verarbeiten</button>
+    </div>
+  </div>
+
+  <!-- Queue Progress page -->
+  <div class="page" id="page-queue-progress">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="card-title" style="margin-bottom:0">Verarbeitung läuft…</div>
+        <div id="qp-summary" style="font-size:13px;color:var(--text2)"></div>
+      </div>
+      <div id="qp-job-list"></div>
+    </div>
+    <div id="qp-all-done" style="display:none;text-align:center;padding:8px 0">
+      <button class="btn-primary" id="btn-qp-review">Ergebnisse reviewen →</button>
+    </div>
+  </div>
+
+  <!-- Review page (rebuilt for queue flow) -->
   <div class="page" id="page-review">
 
+    <!-- Navigation bar (multi-queue) -->
+    <div id="review-nav" style="display:none;align-items:center;gap:12px;background:var(--surface);padding:12px 16px;border-radius:var(--radius);box-shadow:var(--shadow)">
+      <button class="btn-secondary" id="btn-review-prev" style="padding:5px 12px;font-size:12px">← Zurück</button>
+      <div id="review-nav-label" style="flex:1;text-align:center;font-size:13px;color:var(--text2)"></div>
+      <button class="btn-secondary" id="btn-review-next" style="padding:5px 12px;font-size:12px">Weiter →</button>
+    </div>
+
+    <!-- Bereich 1: Terms (collapsible) -->
     <div class="card">
-      <div style="margin-bottom:16px">
-        <div class="card-title" id="review-filename" style="margin-bottom:4px;word-break:break-all">Review</div>
-        <div id="review-stats" style="font-size:13px;color:var(--text2)"></div>
+      <div id="review-terms-header" style="cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div>
+          <span class="card-title" style="margin-bottom:0">Neue Begriffe</span>
+          <span id="review-new-count" style="font-weight:400;color:var(--text2);margin-left:6px"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="btn-secondary" id="btn-toggle-all" style="font-size:12px;padding:4px 10px">Alle ✓</button>
+          <a href="#" id="review-token-mgmt-link" style="font-size:12px;color:var(--accent);white-space:nowrap">Token-Verwaltung</a>
+          <span id="review-terms-chevron" class="tree-chevron open" style="transform:rotate(90deg)">▶</span>
+        </div>
       </div>
-      <div class="section-header">
-        <div class="section-label">Neue Begriffe <span id="review-new-count" style="font-weight:400"></span></div>
-        <button class="btn-secondary" id="btn-toggle-all" style="font-size:12px;padding:5px 12px">Alle ✓</button>
+      <div id="review-terms-body">
+        <div class="token-list" id="review-token-list"></div>
+        <div id="review-stats" style="font-size:12px;color:var(--text2);margin-top:8px;padding-top:8px;border-top:1px solid var(--border)"></div>
+        <div id="review-cost-info" style="font-size:12px;color:var(--text2);margin-top:4px"></div>
+        <div id="review-elapsed" style="display:none;font-size:12px;color:var(--text2)"></div>
       </div>
-      <div class="token-list" id="review-token-list"></div>
     </div>
 
-    <div class="card" id="review-dup-card" style="display:none">
-      <div class="card-title">Mögliche Duplikate <span id="review-dup-count" style="color:var(--text2);font-weight:400"></span></div>
-      <div id="review-dup-list"></div>
+    <!-- Bereich 2: Meta Edit -->
+    <div class="card">
+      <div class="card-title" style="margin-bottom:12px">Metadaten</div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label>Titel</label>
+        <input type="text" id="review-meta-title" style="width:100%">
+      </div>
+      <div style="display:flex;gap:12px">
+        <div class="form-group" style="flex:2;margin-bottom:0">
+          <label>Autor</label>
+          <input type="text" id="review-meta-author" style="width:100%">
+        </div>
+        <div class="form-group" style="flex:0 0 90px;margin-bottom:0">
+          <label>Jahr</label>
+          <input type="text" id="review-meta-year" style="width:100%">
+        </div>
+      </div>
     </div>
 
-    <div id="review-citation" style="display:none;font-size:12px;color:var(--text2);padding:10px 14px;background:var(--surface2);border-radius:var(--radius-sm);word-break:break-all;line-height:1.6"></div>
-    <div id="review-cost-info" style="font-size:12px;color:var(--text2);text-align:right;padding:0 4px"></div>
-    <div id="review-elapsed" style="display:none;font-size:12px;color:var(--text2);text-align:right;padding:0 4px"></div>
+    <!-- Bereich 3: MD Preview -->
+    <div class="card">
+      <div id="review-preview-toggle" style="cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center">
+        <div id="review-preview-label" style="font-size:14px;font-weight:500;color:var(--text2)">Vorschau</div>
+        <span id="review-preview-chevron" class="tree-chevron">▶</span>
+      </div>
+      <div id="review-preview-body" style="display:none;margin-top:12px">
+        <pre id="review-preview-content" style="max-height:400px;overflow-y:auto;font-size:11px;white-space:pre-wrap;word-break:break-all;background:var(--surface2);padding:12px;border-radius:var(--radius-sm);line-height:1.5"></pre>
+      </div>
+    </div>
 
     <div class="review-actions">
       <button class="btn-secondary" id="btn-quality-pass" style="white-space:nowrap">Nochmal mit Claude</button>
@@ -914,6 +1016,17 @@
   let bookPreviewChapters = [];
   let bkpAllSelected = true;
   let bkpAuthorVisible = false;
+  // Queue state
+  let queueFiles = [];    // [{id, file, type}]
+  let queueModel = 'auto';
+  let activeJobs = [];    // [{job_id, filename, status, stage, draft, error}]
+  let reviewJobIdx = 0;
+  let queuePollTimer = null;
+  let reviewTermsOpen = true;
+  let reviewDrafts = {};  // {job_id: {tokens, metaTitle, metaAuthor, metaYear}}
+  let savedJobIds = new Set();
+  let bookReviewBookId = null;
+  let jobStartTimes = {};  // {job_id: Date.now()}
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -962,27 +1075,29 @@
     pageBulk.classList.toggle('active', page === 'bulk');
     pageJobs.classList.toggle('active', page === 'jobs');
     pageBookPreview.classList.toggle('active', page === 'book-preview');
+    document.getElementById('page-queue').classList.toggle('active', page === 'queue');
+    document.getElementById('page-queue-progress').classList.toggle('active', page === 'queue-progress');
     document.querySelector('main').classList.toggle('wide', page === 'book-preview');
     const onReview = page === 'review';
     const onBkp = page === 'book-preview';
-    // Active highlight for current page
+    const onQueue = page === 'queue' || page === 'queue-progress';
     btnSettings.classList.toggle('active', page === 'settings');
     btnHome.classList.toggle('active', page === 'home');
     btnTokens.classList.toggle('active', page === 'tokens');
     btnBulk.classList.toggle('active', page === 'bulk');
     btnJobs.classList.toggle('active', page === 'jobs');
-    // Hide all nav icons on review/book-preview; hide home on home page
-    const hideAll = onReview || onBkp;
+    const hideAll = onReview || onBkp || onQueue;
     btnSettings.classList.toggle('hidden', hideAll);
     btnTokens.classList.toggle('hidden', hideAll);
     btnBulk.classList.toggle('hidden', hideAll);
     btnJobs.classList.toggle('hidden', hideAll);
-    btnHome.classList.toggle('hidden', page === 'home');
+    btnHome.classList.toggle('hidden', onReview || onBkp);
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
     if (page === 'review') renderReview();
     if (page === 'jobs') loadJobsPage();
     if (page === 'book-preview') renderBookPreview();
+    if (page === 'queue') renderQueue();
   }
 
   // Ollama status
@@ -1016,7 +1131,7 @@
     } catch {}
   }
 
-  // File handling
+  // File handling — multi-file queue
   dropZone.addEventListener('dragover', e => {
     e.preventDefault();
     dropZone.classList.add('drag-over');
@@ -1025,39 +1140,36 @@
   dropZone.addEventListener('drop', e => {
     e.preventDefault();
     dropZone.classList.remove('drag-over');
-    const f = e.dataTransfer.files[0];
-    if (f && f.type === 'application/pdf') setFile(f);
-    else showToast('Nur PDF-Dateien werden unterstützt');
+    const files = [...e.dataTransfer.files].filter(f => f.type === 'application/pdf');
+    if (!files.length) { showToast('Nur PDF-Dateien werden unterstützt'); return; }
+    addToQueue(files);
   });
-
   fileInput.addEventListener('change', () => {
-    if (fileInput.files[0]) setFile(fileInput.files[0]);
+    const files = [...fileInput.files].filter(f => f.type === 'application/pdf');
+    if (files.length) addToQueue(files);
+    fileInput.value = '';
   });
 
-  async function setFile(f) {
+  function addToQueue(files) {
+    const newEntries = files.map(f => ({
+      id: Math.random().toString(36).slice(2),
+      file: f,
+      type: f.size > 3 * 1024 * 1024 ? 'book' : 'article',
+    }));
+    const onQueuePage = document.getElementById('page-queue').classList.contains('active');
+    if (onQueuePage) {
+      queueFiles = [...queueFiles, ...newEntries];
+      renderQueue();
+    } else {
+      queueFiles = newEntries;
+      if (files.length > 5) showToast(`${files.length} Dateien in der Queue — das kann lange dauern.`);
+      showPage('queue');
+    }
+  }
+
+  // Keep setFile for backward compat (book preview flow)
+  function setFile(f) {
     selectedFile = f;
-    dropZone.querySelector('.drop-title').textContent = f.name;
-    dropZone.querySelector('.drop-sub').textContent = formatBytes(f.size);
-    btnProcess.disabled = false;
-    clearStatus();
-    updateBookWarning();
-    if (processingType === 'article' && f.size > 3 * 1024 * 1024) return;
-    // Duplikat-Check via source_pdf
-    try {
-      const r = await fetch(`${API}/check/duplicate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pdf_filename: f.name }),
-      });
-      if (!r.ok) return;
-      const data = await r.json();
-      if (data.exists && data.existing_file) {
-        setStatus('info',
-          `⚠ Dieses PDF wurde bereits verarbeitet: <strong>${data.existing_file}</strong><br>` +
-          `<span style="color:var(--text2);font-size:12px">Trotzdem verarbeiten → erstellt eine neue Note</span>`
-        );
-      }
-    } catch { /* Backend nicht erreichbar — kein Blocker */ }
   }
 
   function formatBytes(b) {
@@ -1093,7 +1205,173 @@
     });
   });
 
-  // Process
+  // Queue: model toggle
+  document.getElementById('queue-model-toggle').querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('queue-model-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      queueModel = btn.dataset.model;
+      const labels = { auto: 'Automatisch: Ollama wenn verfügbar, sonst Claude', ollama: 'Immer Ollama (lokal)', claude: 'Immer Claude API' };
+      document.getElementById('queue-model-sub').textContent = labels[queueModel];
+    });
+  });
+
+  function renderQueue() {
+    const articles = queueFiles.filter(f => f.type === 'article');
+    const books = queueFiles.filter(f => f.type === 'book');
+    document.getElementById('queue-subtitle').textContent =
+      `${queueFiles.length} ${queueFiles.length === 1 ? 'Datei' : 'Dateien'}`;
+    const warnEl = document.getElementById('queue-warning');
+    if (books.length > 0) {
+      warnEl.style.display = 'block';
+      warnEl.textContent = books.length === 1
+        ? 'Bücher dauern ca. 1 Stunde pro Stück. Empfehlung: Bücher einzeln verarbeiten.'
+        : `${books.length} Bücher erkannt — dauern ca. 1h pro Stück. Empfehlung: einzeln verarbeiten.`;
+    } else {
+      warnEl.style.display = 'none';
+    }
+    const runBtn = document.getElementById('btn-queue-run');
+    runBtn.disabled = queueFiles.length === 0;
+    runBtn.textContent = articles.length > 0
+      ? `${articles.length} Artikel verarbeiten`
+      : books.length === 1 ? 'Zum TOC-Screen' : 'Verarbeiten';
+
+    const listEl = document.getElementById('queue-file-list');
+    listEl.innerHTML = queueFiles.map((f, idx) => `
+      <div class="queue-row" draggable="true" data-idx="${idx}" data-id="${f.id}">
+        <span class="queue-drag-handle" title="Ziehen zum Sortieren">⠿</span>
+        <div class="queue-filename" title="${esc(f.file.name)}">${esc(f.file.name)}</div>
+        <div style="font-size:12px;color:var(--text2);flex-shrink:0">${formatBytes(f.file.size)}</div>
+        <div style="display:flex;gap:4px;flex-shrink:0">
+          <button class="queue-type-btn ${f.type === 'article' ? 'active' : ''}" data-id="${f.id}" data-type="article">Artikel</button>
+          <button class="queue-type-btn ${f.type === 'book' ? 'active' : ''}" data-id="${f.id}" data-type="book">Buch</button>
+        </div>
+        <button class="queue-del-btn" data-id="${f.id}">×</button>
+      </div>`).join('');
+
+    document.querySelectorAll('.queue-type-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const qf = queueFiles.find(f => f.id === btn.dataset.id);
+        if (qf) { qf.type = btn.dataset.type; renderQueue(); }
+      });
+    });
+    document.querySelectorAll('.queue-del-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        queueFiles = queueFiles.filter(f => f.id !== btn.dataset.id);
+        if (!queueFiles.length) showPage('home');
+        else renderQueue();
+      });
+    });
+    // Drag & drop reordering
+    let dragIdx = null;
+    listEl.querySelectorAll('.queue-row').forEach(row => {
+      row.addEventListener('dragstart', () => { dragIdx = +row.dataset.idx; row.style.opacity = '0.4'; });
+      row.addEventListener('dragend', () => { row.style.opacity = ''; dragIdx = null; listEl.querySelectorAll('.queue-row').forEach(r => r.classList.remove('drag-over')); });
+      row.addEventListener('dragover', e => { e.preventDefault(); listEl.querySelectorAll('.queue-row').forEach(r => r.classList.remove('drag-over')); row.classList.add('drag-over'); });
+      row.addEventListener('drop', () => {
+        const dropIdx = +row.dataset.idx;
+        if (dragIdx === null || dragIdx === dropIdx) return;
+        const moved = queueFiles.splice(dragIdx, 1)[0];
+        queueFiles.splice(dropIdx, 0, moved);
+        renderQueue();
+      });
+    });
+  }
+
+  document.getElementById('btn-queue-back').addEventListener('click', () => {
+    queueFiles = [];
+    showPage('home');
+  });
+
+  document.getElementById('btn-queue-run').addEventListener('click', async () => {
+    const articles = queueFiles.filter(f => f.type === 'article');
+    const books = queueFiles.filter(f => f.type === 'book');
+
+    if (articles.length === 0 && books.length === 1) {
+      selectedFile = books[0].file;
+      queueFiles = [];
+      await startBookPreview();
+      return;
+    }
+    if (books.length > 0) showToast(`${books.length} Buch/Bücher übersprungen — bitte einzeln über TOC verarbeiten.`);
+    if (!articles.length) return;
+
+    const btn = document.getElementById('btn-queue-run');
+    btn.disabled = true;
+    const fd = new FormData();
+    for (const qf of articles) fd.append('files', qf.file);
+    fd.append('model', queueModel);
+    try {
+      const r = await fetch(`${API}/process/queue`, { method: 'POST', body: fd });
+      const data = await r.json();
+      if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); btn.disabled = false; return; }
+      activeJobs = data.jobs.map(j => ({ ...j, status: 'pending', stage: 'Wartend...', draft: null, error: null }));
+      queueFiles = [];
+      showPage('queue-progress');
+      renderQueueProgress();
+      startQueuePolling();
+    } catch { showToast('Backend nicht erreichbar'); btn.disabled = false; }
+  });
+
+  function renderQueueProgress() {
+    const now = Date.now();
+    const doneCount = activeJobs.filter(j => j.status === 'done' || j.status === 'error' || j.status === 'cancelled').length;
+    document.getElementById('qp-summary').textContent = `${doneCount}/${activeJobs.length} fertig`;
+    const list = document.getElementById('qp-job-list');
+    list.innerHTML = activeJobs.map(j => {
+      const elapsed = j.status === 'processing' && jobStartTimes[j.job_id]
+        ? ` (${Math.floor((now - jobStartTimes[j.job_id]) / 60000)}:${String(Math.floor(((now - jobStartTimes[j.job_id]) / 1000) % 60)).padStart(2,'0')})`
+        : '';
+      const canCancel = j.status === 'pending' || j.status === 'processing';
+      return `<div class="qp-job-row">
+        <div class="qp-status-dot ${j.status}"></div>
+        <div class="qp-filename" title="${esc(j.filename)}">${esc(j.filename)}</div>
+        <div style="font-size:12px;color:var(--text2);flex:1">${esc(j.stage || '')}${elapsed}</div>
+        ${canCancel ? `<button class="queue-del-btn" style="font-size:14px" onclick="cancelQueueJob('${j.job_id}')">×</button>` : ''}
+      </div>`;
+    }).join('');
+    const allDone = activeJobs.every(j => j.status === 'done' || j.status === 'error' || j.status === 'cancelled');
+    document.getElementById('qp-all-done').style.display = allDone ? 'block' : 'none';
+  }
+
+  async function cancelQueueJob(jobId) {
+    try {
+      await fetch(`${API}/process/queue/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job_id: jobId }) });
+      const j = activeJobs.find(j => j.job_id === jobId);
+      if (j) { j.status = 'cancelled'; j.stage = 'Abgebrochen'; }
+      renderQueueProgress();
+    } catch { showToast('Backend nicht erreichbar'); }
+  }
+
+  function startQueuePolling() {
+    if (queuePollTimer) clearInterval(queuePollTimer);
+    queuePollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(`${API}/process/queue/status`);
+        const data = await r.json();
+        for (const sj of data.jobs) {
+          const lj = activeJobs.find(j => j.job_id === sj.job_id);
+          if (lj) {
+            if (sj.status === 'processing' && !jobStartTimes[sj.job_id]) jobStartTimes[sj.job_id] = Date.now();
+            lj.status = sj.status; lj.stage = sj.stage; lj.error = sj.error;
+            if (sj.draft_summary) lj.draft = sj.draft_summary;
+          }
+        }
+        renderQueueProgress();
+        if (activeJobs.every(j => j.status === 'done' || j.status === 'error' || j.status === 'cancelled')) {
+          clearInterval(queuePollTimer); queuePollTimer = null;
+        }
+      } catch {}
+    }, 2000);
+  }
+
+  document.getElementById('btn-qp-review').addEventListener('click', () => {
+    reviewJobIdx = activeJobs.findIndex(j => j.status === 'done');
+    if (reviewJobIdx < 0) { showToast('Keine fertigen Jobs vorhanden'); return; }
+    showPage('review');
+  });
+
+  // Process (single-file legacy flow, now only reached from book-preview non-TOC)
   btnProcess.addEventListener('click', async () => {
     if (!selectedFile || processing) return;
     // Cost cap warning: Claude-only mode with large files can be expensive
@@ -1150,12 +1428,7 @@
         reviewAllSelected = true;
         reviewIsBulk = false;
         resetDrop();
-        pageHome.classList.remove('active');
-        pageReview.classList.add('active');
-        btnHome.style.display = 'flex';
-        btnSettings.style.display = 'none';
-        btnTokens.style.display = 'none';
-        renderReview();
+        showPage('review');
       }
     } catch (e) {
       setStatus('error', `Verbindung zum Backend fehlgeschlagen. Läuft uvicorn auf Port 5050?`);
@@ -1600,13 +1873,7 @@
         reviewIgnoredDups = new Set();
         reviewAllSelected = true;
         reviewIsBulk = true;
-        pageBulk.classList.remove('active');
-        pageReview.classList.add('active');
-        btnHome.style.display = 'flex';
-        btnBulk.style.display = 'none';
-        btnSettings.style.display = 'none';
-        btnTokens.style.display = 'none';
-        renderReview();
+        showPage('review');
       }
     } catch { showToast('Backend nicht erreichbar'); }
     finally {
@@ -1623,200 +1890,252 @@
   };
   const TYPE_LABELS = { person: 'Person', concept: 'Konzept', method: 'Methode' };
 
-  function renderReview() {
-    if (!currentDraft) return;
-    const d = currentDraft;
+  // ── Review (queue-based + legacy fallback) ────────────────────────────────
 
-    document.getElementById('review-filename').textContent = `Review: ${d.filename}`;
-    const s = d.stats;
-    document.getElementById('review-stats').textContent =
-      `${s.links_total} Links erkannt · ${s.filtered} gefiltert · ${s.new} neue Begriffe`;
+  function _currentReviewDraft() {
+    if (activeJobs.length > 0 && activeJobs[reviewJobIdx]) return activeJobs[reviewJobIdx].draft;
+    return currentDraft;
+  }
 
-    const c = d.cost;
-    if (c && (c.input_tokens > 0 || c.phase1_model === 'ollama')) {
-      const costEur = ((c.input_tokens * 0.0000008 + c.output_tokens * 0.000004) * 0.92 * 100).toFixed(3);
-      let costStr;
-      if (c.phase1_model === 'ollama') {
-        costStr = `~0.00¢ (Ollama)${c.input_tokens > 0 ? ` + ~${costEur}¢ (Claude)` : ''}`;
-      } else {
-        costStr = `~${costEur}¢`;
-      }
-      if (c.cache_read_tokens > 0) {
-        const savedCents = ((c.cache_read_tokens || 0) * (0.0000008 - 0.000000080) * 0.92 * 100).toFixed(3);
-        costStr += ` (Cache: ${savedCents}¢ gespart)`;
-      }
-      document.getElementById('review-cost-info').textContent =
-        `${s.model_used} · ${s.chunks} Chunks · ${costStr}`;
-    }
-    if (processStartTime !== null) {
-      const totalSec = Math.round((performance.now() - processStartTime) / 1000);
-      const mins = Math.floor(totalSec / 60);
-      const secs = (totalSec % 60).toString().padStart(2, '0');
-      const elapsedEl = document.getElementById('review-elapsed');
-      elapsedEl.textContent = `Verarbeitungszeit: ${mins}:${secs}`;
-      elapsedEl.style.display = 'block';
-      processStartTime = null;
-    }
-    const citEl = document.getElementById('review-citation');
-    if (s.citation_apa) {
-      citEl.innerHTML = `<strong>APA:</strong> ${s.citation_apa}`;
-      citEl.style.display = 'block';
+  function saveCurrentReviewState() {
+    const job = activeJobs[reviewJobIdx];
+    if (!job || !job.draft) return;
+    reviewDrafts[job.job_id] = {
+      tokens: job.draft.tokens ? [...job.draft.tokens] : [],
+      metaTitle: document.getElementById('review-meta-title').value,
+      metaAuthor: document.getElementById('review-meta-author').value,
+      metaYear: document.getElementById('review-meta-year').value,
+    };
+  }
+
+  function loadReviewState(job) {
+    const saved = reviewDrafts[job.job_id];
+    const d = job.draft || {};
+    const meta = d.meta || {};
+    if (saved) {
+      job.draft.tokens = saved.tokens;
+      document.getElementById('review-meta-title').value = saved.metaTitle;
+      document.getElementById('review-meta-author').value = saved.metaAuthor;
+      document.getElementById('review-meta-year').value = saved.metaYear;
     } else {
-      citEl.style.display = 'none';
+      document.getElementById('review-meta-title').value = meta.title || '';
+      document.getElementById('review-meta-author').value = meta.author || '';
+      document.getElementById('review-meta-year').value = meta.year || '';
     }
+  }
+
+  function renderReview() {
+    const d = _currentReviewDraft();
+    if (!d) return;
+    const isQueue = activeJobs.length > 0;
+
+    if (isQueue) loadReviewState(activeJobs[reviewJobIdx]);
+
+    // Navigation bar
+    const navEl = document.getElementById('review-nav');
+    if (isQueue && activeJobs.length > 1) {
+      navEl.style.display = 'flex';
+      const job = activeJobs[reviewJobIdx];
+      const savedMark = savedJobIds.has(job?.job_id) ? ' ✓' : '';
+      document.getElementById('review-nav-label').textContent =
+        `${job?.filename || ''}${savedMark} (${reviewJobIdx + 1}/${activeJobs.length})`;
+      document.getElementById('btn-review-prev').disabled = reviewJobIdx === 0;
+      document.getElementById('btn-review-next').disabled = reviewJobIdx >= activeJobs.length - 1;
+    } else {
+      navEl.style.display = 'none';
+    }
+
+    // Meta fields (already set by loadReviewState for queue jobs)
+    if (!isQueue) {
+      const meta = d.meta || {};
+      document.getElementById('review-meta-title').value = meta.title || '';
+      document.getElementById('review-meta-author').value = meta.author || '';
+      document.getElementById('review-meta-year').value = meta.year || '';
+    }
+
+    // Preview — wikilinks hervorheben
+    document.getElementById('review-preview-label').textContent = `Vorschau: ${d.filename || ''}`;
+    const rawContent = d.content || '';
+    document.getElementById('review-preview-content').innerHTML =
+      rawContent.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g,
+          (_, target, display) => `<span style="color:var(--accent)">${display || target}</span>`);
+
+    // Stats & cost
+    const s = d.stats || {};
+    document.getElementById('review-stats').textContent =
+      [s.links_total && `${s.links_total} Links`, s.filtered && `${s.filtered} gefiltert`,
+       s.new && `${s.new} neue Begriffe`].filter(Boolean).join(' · ');
+    const c = d.cost || {};
+    if (c.input_tokens > 0 || c.phase1_model === 'ollama') {
+      const costEur = ((c.input_tokens * 0.0000008 + c.output_tokens * 0.000004) * 0.92 * 100).toFixed(3);
+      const costStr = c.phase1_model === 'ollama'
+        ? `~0.00¢ (Ollama)${c.input_tokens > 0 ? ` + ~${costEur}¢ (Claude)` : ''}`
+        : `~${costEur}¢`;
+      document.getElementById('review-cost-info').textContent =
+        `${s.model_used || ''} · ${s.chunks || 0} Chunks · ${costStr}`;
+    } else {
+      document.getElementById('review-cost-info').textContent = '';
+    }
+
+    // Quality-pass only for legacy single-file flow
+    document.getElementById('btn-quality-pass').style.display = isQueue ? 'none' : '';
 
     renderTokenList();
-    renderReviewDuplicates();
   }
 
   function renderTokenList() {
-    if (!currentDraft) return;
-    const tokens = currentDraft.tokens;
+    const d = _currentReviewDraft();
+    if (!d) return;
+    const tokens = d.tokens || [];
     const selected = tokens.filter(t => t.selected);
     const unselected = tokens.filter(t => !t.selected);
     const newCount = tokens.filter(t => t.is_new && t.selected).length;
     document.getElementById('review-new-count').textContent = `(${newCount})`;
-
     const list = document.getElementById('review-token-list');
     list.innerHTML = [...selected, ...unselected].map(t => {
       const cacheBadge = !t.is_new ? '<span class="tbadge cache">cache</span>' : '';
-      const typeBadge = t.type && TYPE_LABELS[t.type]
-        ? `<span class="tbadge ${t.type}">${TYPE_LABELS[t.type]}</span>` : '';
-      const filterBadge = t.filtered_reason
-        ? `<span class="tbadge noise">${FILTER_LABELS[t.filtered_reason] || t.filtered_reason}</span>` : '';
-      const srcBadge = t.source
-        ? `<span class="bulk-source" title="${t.source}">${t.source}</span>` : '';
+      const typeBadge = t.type && TYPE_LABELS[t.type] ? `<span class="tbadge ${t.type}">${TYPE_LABELS[t.type]}</span>` : '';
+      const filterBadge = t.filtered_reason ? `<span class="tbadge noise">${FILTER_LABELS[t.filtered_reason] || t.filtered_reason}</span>` : '';
       return `<div class="token-row">
         <input type="checkbox" class="token-check" data-canonical="${esc(t.canonical)}" ${t.selected ? 'checked' : ''}>
         <span class="token-label${t.filtered_reason ? ' dim' : ''}">${t.canonical}</span>
-        ${typeBadge}${cacheBadge}${filterBadge}${srcBadge}
+        ${typeBadge}${cacheBadge}${filterBadge}
       </div>`;
     }).join('');
-
     list.querySelectorAll('.token-check').forEach(cb => {
       cb.addEventListener('change', () => {
-        const tok = currentDraft.tokens.find(t => t.canonical === cb.dataset.canonical);
+        const tok = (d.tokens || []).find(t => t.canonical === cb.dataset.canonical);
         if (tok) tok.selected = cb.checked;
-        const newCount = currentDraft.tokens.filter(t => t.is_new && t.selected).length;
-        document.getElementById('review-new-count').textContent = `(${newCount})`;
+        document.getElementById('review-new-count').textContent =
+          `(${(d.tokens || []).filter(t => t.is_new && t.selected).length})`;
       });
     });
   }
 
-  function renderReviewDuplicates() {
-    if (!currentDraft) return;
-    const dups = currentDraft.duplicate_suggestions || [];
-    const card = document.getElementById('review-dup-card');
-    const visible = dups.filter(([a, b]) => !reviewIgnoredDups.has(a + '|' + b));
-    if (!visible.length) { card.style.display = 'none'; return; }
-    card.style.display = 'block';
-    document.getElementById('review-dup-count').textContent = `(${visible.length})`;
-    document.getElementById('review-dup-list').innerHTML = visible.map(([a, b]) => `
-      <div class="dup-pair">
-        <div class="dup-names">${a} <span>↔</span> ${b}</div>
-        <div class="dup-actions">
-          <button class="btn-merge" onclick="handleReviewMerge('${esc(a)}','${esc(b)}','${esc(a)}')">→ ${a}</button>
-          <button class="btn-merge" onclick="handleReviewMerge('${esc(a)}','${esc(b)}','${esc(b)}')">→ ${b}</button>
-          <button class="btn-ignore" onclick="ignoreReviewDup('${esc(a)}','${esc(b)}')">Ignorieren</button>
-        </div>
-      </div>`).join('');
-  }
+  // Terms collapsible
+  document.getElementById('review-terms-header').addEventListener('click', e => {
+    if (e.target.closest('button') || e.target.closest('a')) return;
+    reviewTermsOpen = !reviewTermsOpen;
+    document.getElementById('review-terms-body').style.display = reviewTermsOpen ? '' : 'none';
+    document.getElementById('review-terms-chevron').style.transform = reviewTermsOpen ? 'rotate(90deg)' : '';
+  });
 
-  function handleReviewMerge(a, b, keep) {
-    const remove = keep === a ? b : a;
-    reviewMergedTerms.push({ keep, remove });
-    const tok = currentDraft.tokens.find(t => t.canonical === remove);
-    if (tok) tok.selected = false;
-    reviewIgnoredDups.add(a + '|' + b);
-    renderTokenList();
-    renderReviewDuplicates();
-    showToast(`"${remove}" → "${keep}"`);
-  }
+  // MD Preview collapsible
+  document.getElementById('review-preview-toggle').addEventListener('click', () => {
+    const body = document.getElementById('review-preview-body');
+    const chev = document.getElementById('review-preview-chevron');
+    const open = body.style.display === 'none';
+    body.style.display = open ? 'block' : 'none';
+    chev.classList.toggle('open', open);
+  });
 
-  function ignoreReviewDup(a, b) {
-    reviewIgnoredDups.add(a + '|' + b);
-    renderReviewDuplicates();
-  }
+  // Token-Verwaltung link
+  document.getElementById('review-token-mgmt-link').addEventListener('click', e => {
+    e.preventDefault();
+    showPage('tokens');
+  });
+
+  // Navigation prev/next (free — no save required)
+  document.getElementById('btn-review-prev').addEventListener('click', () => {
+    if (reviewJobIdx > 0) { saveCurrentReviewState(); reviewJobIdx--; renderReview(); }
+  });
+  document.getElementById('btn-review-next').addEventListener('click', () => {
+    if (reviewJobIdx < activeJobs.length - 1) { saveCurrentReviewState(); reviewJobIdx++; renderReview(); }
+  });
 
   document.getElementById('btn-toggle-all').addEventListener('click', () => {
     reviewAllSelected = !reviewAllSelected;
-    currentDraft.tokens.forEach(t => { if (!t.filtered_reason) t.selected = reviewAllSelected; });
+    const d = _currentReviewDraft();
+    if (d) (d.tokens || []).forEach(t => { if (!t.filtered_reason) t.selected = reviewAllSelected; });
     document.getElementById('btn-toggle-all').textContent = reviewAllSelected ? 'Alle ✓' : 'Alle ☐';
     renderTokenList();
   });
 
   document.getElementById('btn-confirm-review').addEventListener('click', async () => {
-    // TODO v2.8: Speichern-Bug — tritt nach Rerun auf, Button bleibt ausgegraut. Noch nicht reproduzierbar.
-    console.log('[mneme] Speichern clicked. currentDraft:', currentDraft, 'btn disabled:', document.getElementById('btn-confirm-review').disabled);
-    if (!currentDraft) return;
-    const selectedTerms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
     const btn = document.getElementById('btn-confirm-review');
     btn.disabled = true;
     btn.textContent = 'Speichert…';
-    const endpoint = reviewIsBulk ? `${API}/process/bulk_confirm` : `${API}/process/confirm`;
-    try {
-      const r = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_terms: selectedTerms, merged_terms: reviewMergedTerms }),
-      });
-      const data = await r.json();
-      if (r.ok) {
-        btn.disabled = false;
-        btn.textContent = 'Speichern';
-        currentDraft = null;
-        reviewMergedTerms = [];
-        reviewIsBulk = false;
-        processStartTime = null;
-        document.getElementById('review-elapsed').style.display = 'none';
-        pageReview.classList.remove('active');
-        pageHome.classList.add('active');
-        btnHome.style.display = 'none';
-        btnSettings.style.display = 'flex';
-        btnTokens.style.display = 'flex';
-        btnBulk.style.display = 'flex';
-        if (data.confirmed) {
-          // bulk result
-          setStatus('success',
-            `${data.total} Notizen gespeichert` +
-            (data.errors.length ? `<br>${data.errors.length} Fehler` : '')
-          );
-          showToast(`${data.total} Notizen gespeichert ✓`);
-        } else {
-          // single result
-          const stubStr = data.stubs_created > 0 ? `<br>+ ${data.stubs_created} neue Concept-Files erstellt` : '';
-          setStatus('success',
-            `Notiz erstellt: <strong>${data.filename}</strong><br>` +
-            `Modell: ${data.model_used} · ${data.wikilinks_total} Wikilinks gesetzt${stubStr}`
-          );
-          showToast('Notiz gespeichert ✓');
-        }
-        loadVaultTree();
-      } else {
-        showToast(`Fehler: ${data.detail || r.statusText}`);
-        btn.disabled = false;
-        btn.textContent = 'Speichern';
-      }
-    } catch {
-      showToast('Backend nicht erreichbar');
-      btn.disabled = false;
-      btn.textContent = 'Speichern';
+    const isQueue = activeJobs.length > 0;
+
+    if (isQueue) {
+      const job = activeJobs[reviewJobIdx];
+      if (!job || !job.draft) { btn.disabled = false; btn.textContent = 'Speichern'; return; }
+      const selectedTerms = (job.draft.tokens || []).filter(t => t.selected).map(t => t.canonical);
+      const meta = job.draft.meta || {};
+      const metaOverride = {
+        title: document.getElementById('review-meta-title').value || meta.title || '',
+        author: document.getElementById('review-meta-author').value || meta.author || '',
+        year: document.getElementById('review-meta-year').value || meta.year || '',
+      };
+      try {
+        const r = await fetch(`${API}/process/queue/confirm`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: job.job_id, selected_terms: selectedTerms,
+                                  merged_terms: reviewMergedTerms, meta_override: metaOverride }),
+        });
+        const data = await r.json();
+        if (r.ok) {
+          savedJobIds.add(job.job_id);
+          reviewMergedTerms = [];
+          showToast(`Gespeichert: ${data.filename} ✓`);
+          loadVaultTree();
+          // Update nav label to show ✓
+          const unsavedDone = activeJobs.find(j => j.status === 'done' && !savedJobIds.has(j.job_id));
+          if (unsavedDone) {
+            saveCurrentReviewState();
+            reviewJobIdx = activeJobs.indexOf(unsavedDone);
+            renderReview();
+          } else {
+            // All saved — finalize book if applicable
+            if (bookReviewBookId) {
+              try {
+                await fetch(`${API}/process/book/finalize`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ book_id: bookReviewBookId }),
+                });
+              } catch {}
+              bookReviewBookId = null;
+            }
+            const savedCount = savedJobIds.size;
+            activeJobs = []; reviewJobIdx = 0; savedJobIds = new Set(); reviewDrafts = {};
+            showPage('home');
+            setStatus('success', `${savedCount} Notizen gespeichert ✓`);
+          }
+        } else { showToast(`Fehler: ${data.detail || r.statusText}`); }
+      } catch { showToast('Backend nicht erreichbar'); }
+      btn.disabled = false; btn.textContent = 'Speichern';
+    } else {
+      // Legacy single-file flow
+      if (!currentDraft) { btn.disabled = false; btn.textContent = 'Speichern'; return; }
+      const selectedTerms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
+      const endpoint = reviewIsBulk ? `${API}/process/bulk_confirm` : `${API}/process/confirm`;
+      try {
+        const r = await fetch(endpoint, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ selected_terms: selectedTerms, merged_terms: reviewMergedTerms }),
+        });
+        const data = await r.json();
+        if (r.ok) {
+          currentDraft = null; reviewMergedTerms = []; reviewIsBulk = false;
+          if (data.confirmed) { showToast(`${data.total} Notizen gespeichert ✓`); setStatus('success', `${data.total} Notizen gespeichert`); }
+          else { showToast('Notiz gespeichert ✓'); setStatus('success', `Notiz erstellt: <strong>${data.filename}</strong><br>${data.wikilinks_total} Wikilinks`); }
+          loadVaultTree();
+          showPage('home');
+        } else { showToast(`Fehler: ${data.detail || r.statusText}`); }
+      } catch { showToast('Backend nicht erreichbar'); }
+      btn.disabled = false; btn.textContent = 'Speichern';
     }
   });
 
   document.getElementById('btn-cancel-review').addEventListener('click', () => {
     if (!confirm('Entwurf verwerfen? Nichts wird gespeichert.')) return;
-    currentDraft = null;
-    reviewMergedTerms = [];
-    const wasBulk = reviewIsBulk;
-    reviewIsBulk = false;
-    pageReview.classList.remove('active');
-    (wasBulk ? pageBulk : pageHome).classList.add('active');
-    btnHome.style.display = wasBulk ? 'flex' : 'none';
-    btnSettings.style.display = 'flex';
-    btnTokens.style.display = 'flex';
-    btnBulk.style.display = wasBulk ? 'none' : 'flex';
-    if (!wasBulk) resetDrop();
+    if (activeJobs.length > 0) {
+      activeJobs = []; reviewJobIdx = 0;
+    } else {
+      currentDraft = null; reviewMergedTerms = []; reviewIsBulk = false;
+    }
+    showPage('home');
   });
 
   document.getElementById('btn-quality-pass').addEventListener('click', async () => {
@@ -1824,33 +2143,22 @@
     const terms = currentDraft.tokens.filter(t => t.selected).map(t => t.canonical);
     if (!terms.length) { showToast('Keine aktiven Begriffe'); return; }
     const btn = document.getElementById('btn-quality-pass');
-    btn.disabled = true;
-    btn.textContent = 'Claude analysiert…';
+    btn.disabled = true; btn.textContent = 'Claude analysiert…';
     try {
       const r = await fetch(`${API}/process/quality_pass`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ terms }),
       });
       const data = await r.json();
       if (r.ok && Array.isArray(data.remove)) {
         const removeSet = new Set(data.remove);
         let count = 0;
-        currentDraft.tokens.forEach(t => {
-          if (removeSet.has(t.canonical) && t.selected) { t.selected = false; count++; }
-        });
+        currentDraft.tokens.forEach(t => { if (removeSet.has(t.canonical) && t.selected) { t.selected = false; count++; } });
         renderTokenList();
         showToast(`Claude: ${count} Begriff${count !== 1 ? 'e' : ''} deaktiviert`);
-      } else if (data.detail === 'claude_api_key_missing') {
-        showToast('Claude API Key nicht gesetzt');
-      } else {
-        showToast('Quality Pass fehlgeschlagen');
-      }
+      } else { showToast('Quality Pass fehlgeschlagen'); }
     } catch { showToast('Backend nicht erreichbar'); }
-    finally {
-      btn.disabled = false;
-      btn.textContent = 'Nochmal mit Claude';
-    }
+    finally { btn.disabled = false; btn.textContent = 'Nochmal mit Claude'; }
   });
 
   // ── Book Preview ──────────────────────────────────────────────────────────
@@ -2022,6 +2330,7 @@
     const btn = document.getElementById('btn-bkp-run');
     btn.disabled = true;
     showProgress();
+    startPolling();  // #11: Fortschrittsanzeige während Buch-Verarbeitung
     try {
       const r = await fetch(`${API}/process/book/run`, {
         method: 'POST',
@@ -2030,24 +2339,41 @@
       });
       const data = await r.json();
       if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); return; }
-      bookPreviewData = null;
-      bookPreviewChapters = [];
-      showPage('home');
-      const chapCount = data.chapters ? data.chapters.length : 0;
-      const errCount = data.errors ? data.errors.length : 0;
-      const chapDetails = (data.chapters || []).map(c =>
-        `<br><small style="color:var(--text2)">Kap. ${c.chapter}: ${c.links ?? '?'} Links, ${c.new_terms ?? '?'} Begriffe — ${c.title}${c.author ? ' (' + c.author + ')' : ''}</small>`
-      ).join('');
-      setStatus('success',
-        `Buch verarbeitet: <strong>${data.book_title || data.folder}</strong><br>` +
-        `${chapCount} Kapitel in <code>Bücher/${data.folder}/</code>` +
-        (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '') + chapDetails
-      );
-      showToast(`${chapCount} Kapitel gespeichert ✓`);
-      loadVaultTree();
-      resetDrop();
+
+      if (data.status === 'book_review_ready') {
+        // #12: Buch-Review-Flow
+        activeJobs = data.chapters.map(ch => ({
+          job_id: ch.job_id,
+          filename: ch.filename,
+          status: 'done',
+          stage: 'Fertig',
+          draft: {
+            tokens: ch.tokens || [],
+            stats: ch.stats,
+            cost: ch.cost,
+            meta: ch.meta || {},
+            content: ch.content || '',
+            filename: ch.filename,
+          },
+          error: null,
+        }));
+        bookReviewBookId = data.book_id;
+        savedJobIds = new Set();
+        reviewDrafts = {};
+        reviewJobIdx = 0;
+        bookPreviewData = null;
+        bookPreviewChapters = [];
+        if (data.errors?.length) showToast(`${data.errors.length} Kapitel konnten nicht verarbeitet werden.`);
+        showPage('review');
+      } else {
+        // Legacy: book_ready (should not happen anymore, but kept for compat)
+        bookPreviewData = null; bookPreviewChapters = [];
+        showPage('home');
+        showToast(`${(data.chapters||[]).length} Kapitel gespeichert ✓`);
+        loadVaultTree();
+      }
     } catch { showToast('Backend nicht erreichbar'); }
-    finally { btn.disabled = false; hideProgress(); }
+    finally { btn.disabled = false; hideProgress(); stopPolling(); }
   });
 
   document.getElementById('btn-bkp-back').addEventListener('click', () => {
@@ -2084,6 +2410,13 @@
       loadVaultTree();
     } catch { showToast('Backend nicht erreichbar'); }
     finally { btn.disabled = false; runBtn.disabled = false; hideProgress(); if (stageEl) stageEl.innerHTML = ''; }
+  });
+
+  // Reload warning when work is in progress
+  window.addEventListener('beforeunload', e => {
+    const hasPending = queueFiles.length > 0 ||
+      activeJobs.some(j => j.status === 'done' && !savedJobIds.has(j.job_id));
+    if (hasPending) { e.preventDefault(); e.returnValue = ''; }
   });
 
   // Init
