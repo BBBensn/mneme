@@ -4,7 +4,7 @@ type: project
 status: active
 bereich: coding
 tags: [project]
-date_modified: 2026-05-15 17:00:00
+date_modified: 2026-05-15 18:00:00
 ---
 
 ---
@@ -75,10 +75,9 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.9.5 Dateiname-Fix, Duplikat-Warnung ✅ 2026-05-15
 - [x] v2.9.6 Dateiname Leerzeichen-Fix, Duplikat-Warnung via source_pdf ✅ 2026-05-15
 - [x] v2.9.7 Buch-Modus mehrstufig: TOC-Preview, Sammelband-Erkennung ✅ 2026-05-15
-- [x] v2.9.8–2.9.10 Buch-Preview Layout, Warnung-Logik, TOC-Fix, Dry-Run ✅ 2026-05-15
-- [ ] v2.9.11 Vault-weites Re-Linking (Python-only)
-- [ ] v3.0 Token-Verwaltung Bubble+Tree UI
-- [ ] v3.1 Review-Umbau + Multi-File Queue
+- [x] v2.9.8–2.9.12 Buch-Preview Layout, TOC-Fix, Dry-Run, Vault-Relinking, Token-Cleanup ✅ 2026-05-15
+- [ ] v3.0.0 Review-Rebuild + Multi-File Queue
+- [ ] v3.0.1 Link-Merging Bubble+Tree UI
 - [ ] v3.x Graph-UI, Literatursuche via Claude API
 
 ## Offene Fragen / Bekannte Probleme
@@ -86,8 +85,6 @@ Teilprojekt von [[J-Vault]].
 - **tokens.json Skalierung:** Wie gut skaliert bei 100+ Papers? Ab wann wird Lookup langsam?
 - **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks noch ungeprüft ob Ollama größere Input-Texte korrekt verarbeitet.
 - **Buch-Modus Verarbeitungszeit:** ~1h für große Sammelbände mit Ollama (viele Kapitel × Ollama-Latenz).
-- **Mehrzeilige TOC-Titel:** Werden erst ab v2.9.10 korrekt geparst (Preprocessing-Schritt in parse_toc_regex).
-- **Vault-weites Re-Linking:** Noch nicht implementiert — bestehende Notes werden nach Token-Updates nicht automatisch re-verlinkt.
 - **Dry-Run:** Verfügbar für Tests via `localStorage.setItem('mneme_debug','true')` in der Browser-Konsole.
 
 ## Stack & Infrastruktur

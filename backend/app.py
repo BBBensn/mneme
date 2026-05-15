@@ -922,8 +922,8 @@ def _is_author_line(s: str) -> bool:
     if re.search(r'\s+(und|&|/)\s+|\s*,\s*[A-ZÄÖÜ]', s):  # multiple people
         return True
     words = s.split()
-    if 2 <= len(words) <= 4 and all(re.match(r'^[A-ZÄÖÜa-zäöüß][A-ZÄÖÜa-zäöüß\.\-]*$', w) for w in words):
-        return True  # single name: 2-4 alpha words
+    if 2 <= len(words) <= 4 and all(re.match(r'^[^\s\d<>:"/\\|?*;!?()\[\]]+$', w) for w in words):
+        return True  # single name: 2-4 words (unicode-safe, handles é, à, ő etc.)
     return False
 
 
@@ -1007,7 +1007,7 @@ def parse_toc_regex(toc_text: str) -> list[dict]:
 
 
 def derive_chapter_filename(chapter_num: int, chapter_title: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()[:80]
+    safe = re.sub(r'[<>:"/\\|?*]', "", chapter_title).strip()
     safe = re.sub(r'\s+', '-', safe)
     return f"{chapter_num:02d}-{safe}.md"
 
@@ -1243,7 +1243,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.10"
+MNEME_VERSION = "2.9.11"
 
 
 @app.get("/version")
