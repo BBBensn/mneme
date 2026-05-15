@@ -74,6 +74,7 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.9.4 Author Plain Text, Buch-Crash Fix, Buch-Warnung ✅ 2026-05-15
 - [x] v2.9.5 Dateiname-Fix, Duplikat-Warnung ✅ 2026-05-15
 - [x] v2.9.6 Dateiname Leerzeichen-Fix, Duplikat-Warnung via source_pdf ✅ 2026-05-15
+- [x] v2.9.7 Buch-Modus mehrstufig: TOC-Preview, Sammelband-Erkennung ✅ 2026-05-15
 - [ ] v3.0 Vault Explorer: Token-Liste, Merge-UI
 - [ ] v3.1 Buch-Modus Review-Screen
 - [ ] v3.2 Bulk-Verarbeitung (RAW-Data Batch)

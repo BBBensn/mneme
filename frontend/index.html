@@ -433,6 +433,17 @@
     .tbadge.method { background: rgba(255,159,10,0.12); color: #7a4a00; }
     .tbadge.noise { background: rgba(255,59,48,0.07); color: var(--danger); }
 
+    /* Book preview */
+    .bkp-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--border); }
+    .bkp-row:last-child { border-bottom:none; }
+    .bkp-row.section { opacity:0.55; }
+    .bkp-title-input { flex:2; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
+    .bkp-author-input { flex:1.3; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
+    .bkp-page-input { width:54px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
+    .bkp-del { background:none; border:none; cursor:pointer; color:var(--text2); padding:2px 5px; font-size:17px; flex-shrink:0; line-height:1; }
+    .bkp-del:hover { color:var(--danger); }
+    .bkp-type-badge { font-size:11px; padding:1px 6px; border-radius:8px; background:rgba(255,159,10,0.12); color:#7a4a00; white-space:nowrap; flex-shrink:0; }
+
     /* Bulk page */
     .pdf-row {
       display: flex;
@@ -771,6 +782,56 @@
 
   </div>
 
+  <!-- Book Preview page -->
+  <div class="page" id="page-book-preview">
+
+    <div class="card">
+      <div style="margin-bottom:16px">
+        <div class="card-title" id="bkp-title" style="margin-bottom:4px">Buchanalyse</div>
+        <div id="bkp-meta" style="font-size:13px;color:var(--text2)"></div>
+      </div>
+      <div class="section-header" style="margin-bottom:8px">
+        <div class="section-label">Beiträge <span id="bkp-count" style="font-weight:400"></span></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" id="btn-bkp-toggle" style="font-size:12px;padding:5px 12px">Alle ✓</button>
+          <button class="btn-secondary" id="btn-bkp-add" style="font-size:12px;padding:5px 12px">+ Beitrag</button>
+        </div>
+      </div>
+      <div id="bkp-chapter-list"></div>
+    </div>
+
+    <div class="card">
+      <div id="bkp-reparse-toggle" style="cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center">
+        <div class="card-title" style="margin-bottom:0">TOC manuell anpassen</div>
+        <span id="bkp-reparse-chevron" class="tree-chevron">▶</span>
+      </div>
+      <div id="bkp-reparse-body" style="display:none;margin-top:16px">
+        <div class="form-group" style="margin-bottom:16px">
+          <label>Seiten neu einlesen</label>
+          <div class="input-row">
+            <input type="text" id="bkp-page-from" placeholder="von" style="max-width:72px"/>
+            <span style="padding:10px 4px;color:var(--text2)">–</span>
+            <input type="text" id="bkp-page-to" placeholder="bis" style="max-width:72px"/>
+            <button class="btn-secondary" id="btn-bkp-reparse-pages" style="white-space:nowrap">Neu einlesen</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>TOC als Text einfügen</label>
+          <textarea id="bkp-toc-text" rows="6" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:monospace;resize:vertical" placeholder="Inhaltsverzeichnis hier einfügen..."></textarea>
+          <div style="margin-top:8px;display:flex;justify-content:flex-end">
+            <button class="btn-secondary" id="btn-bkp-reparse-text">Parsen</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px">
+      <button class="btn-secondary" id="btn-bkp-back" style="min-width:100px">← Zurück</button>
+      <button class="btn-primary" id="btn-bkp-run" style="flex:1">Verarbeiten</button>
+    </div>
+
+  </div>
+
   <!-- Review page -->
   <div class="page" id="page-review">
 
@@ -858,6 +919,9 @@
   let reviewIsBulk = false;
   let bulkAllPdfsSelected = true;
   let processingType = 'article';
+  let bookPreviewData = null;
+  let bookPreviewChapters = [];
+  let bkpAllSelected = true;
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -871,6 +935,7 @@
   const btnSettings = document.getElementById('btn-settings');
   const btnHome = document.getElementById('btn-home');
   const btnTokens = document.getElementById('btn-tokens');
+  const pageBookPreview = document.getElementById('page-book-preview');
   const dropZone = document.getElementById('drop-zone');
   const fileInput = document.getElementById('file-input');
   const btnProcess = document.getElementById('btn-process');
@@ -904,16 +969,19 @@
     pageReview.classList.toggle('active', page === 'review');
     pageBulk.classList.toggle('active', page === 'bulk');
     pageJobs.classList.toggle('active', page === 'jobs');
+    pageBookPreview.classList.toggle('active', page === 'book-preview');
     const onReview = page === 'review';
-    btnSettings.style.display = (page === 'settings' || onReview) ? 'none' : 'flex';
+    const onBkp = page === 'book-preview';
+    btnSettings.style.display = (page === 'settings' || onReview || onBkp) ? 'none' : 'flex';
     btnHome.style.display = page === 'home' ? 'none' : 'flex';
-    btnTokens.style.display = (page === 'tokens' || onReview) ? 'none' : 'flex';
-    btnBulk.style.display = (page === 'bulk' || onReview) ? 'none' : 'flex';
-    btnJobs.style.display = (page === 'jobs' || onReview) ? 'none' : 'flex';
+    btnTokens.style.display = (page === 'tokens' || onReview || onBkp) ? 'none' : 'flex';
+    btnBulk.style.display = (page === 'bulk' || onReview || onBkp) ? 'none' : 'flex';
+    btnJobs.style.display = (page === 'jobs' || onReview || onBkp) ? 'none' : 'flex';
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
     if (page === 'review') renderReview();
     if (page === 'jobs') loadJobsPage();
+    if (page === 'book-preview') renderBookPreview();
   }
 
   // Ollama status
@@ -1057,14 +1125,20 @@
     showProgress();
     clearStatus();
 
+    // Book mode → preview flow
+    if (processingType === 'book') {
+      await startBookPreview();
+      processing = false;
+      btnProcess.disabled = !selectedFile;
+      hideProgress();
+      return;
+    }
+
     const fd = new FormData();
     fd.append('file', selectedFile);
 
     try {
-      const endpoint = processingType === 'book'
-        ? `${API}/process/book?model=${selectedModel}`
-        : `${API}/process?model=${selectedModel}`;
-      const r = await fetch(endpoint, {
+      const r = await fetch(`${API}/process?model=${selectedModel}`, {
         method: 'POST',
         body: fd,
       });
@@ -1085,22 +1159,7 @@
         return;
       }
 
-      if (data.status === 'book_ready') {
-        const chapCount = data.chapters ? data.chapters.length : 0;
-        const errCount = data.errors ? data.errors.length : 0;
-        const chapDetails = (data.chapters || []).map(c =>
-          `<br><small style="color:var(--text2)">Kap. ${c.chapter}: ${c.links ?? '?'} Links, ${c.new_terms ?? '?'} neue Begriffe — ${c.title}</small>`
-        ).join('');
-        setStatus('success',
-          `Buch verarbeitet: <strong>${data.book_title || data.folder}</strong><br>` +
-          `${chapCount} Kapitel in <code>Bücher/${data.folder}/</code>` +
-          (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '') +
-          chapDetails
-        );
-        showToast(`${chapCount} Kapitel gespeichert ✓`);
-        loadVaultTree();
-        resetDrop();
-      } else if (data.status === 'review_ready') {
+      if (data.status === 'review_ready') {
         currentDraft = data.draft;
         reviewMergedTerms = [];
         reviewIgnoredDups = new Set();
@@ -1788,6 +1847,166 @@
       btn.disabled = false;
       btn.textContent = 'Nochmal mit Claude';
     }
+  });
+
+  // ── Book Preview ──────────────────────────────────────────────────────────
+
+  async function startBookPreview() {
+    const stageEl = document.getElementById('progress-stage');
+    stageEl.textContent = 'Kapitelstruktur wird erkannt...';
+    stageEl.classList.add('active');
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+    try {
+      const r = await fetch(`${API}/process/book/preview?model=${selectedModel}`, {
+        method: 'POST', body: fd,
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        const msgs = { vault_path_not_set: 'Kein Vault-Pfad.', claude_api_key_missing: 'API Key fehlt.' };
+        setStatus('error', msgs[data.detail] || `Fehler: ${data.detail || r.statusText}`);
+        return;
+      }
+      bookPreviewData = data;
+      bookPreviewChapters = data.chapters.map(c => ({...c}));
+      resetDrop();
+      showPage('book-preview');
+    } catch {
+      setStatus('error', 'Verbindung zum Backend fehlgeschlagen.');
+    }
+  }
+
+  function renderBookPreview() {
+    if (!bookPreviewData) return;
+    document.getElementById('bkp-title').textContent = bookPreviewData.title || 'Buchanalyse';
+    const typeBadge = bookPreviewData.book_type === 'sammelband'
+      ? '<span style="background:rgba(255,159,10,0.12);color:#7a4a00;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Sammelband</span>'
+      : '<span style="background:rgba(0,113,227,0.08);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Monographie</span>';
+    document.getElementById('bkp-meta').innerHTML = `${typeBadge} · ${bookPreviewData.total_pages} Seiten`;
+    renderBkpList();
+  }
+
+  function renderBkpList() {
+    const enabled = bookPreviewChapters.filter(c => !c.is_section && c.enabled).length;
+    document.getElementById('bkp-count').textContent = `(${enabled} ausgewählt)`;
+    document.getElementById('btn-bkp-run').textContent = `${enabled} Beiträge verarbeiten`;
+    document.getElementById('bkp-chapter-list').innerHTML = bookPreviewChapters.map((ch, idx) => {
+      if (ch.is_section) {
+        return `<div class="bkp-row section">
+          <span style="flex:1;font-size:13px;color:var(--text2);font-style:italic">— ${esc(ch.title)} (S. ${ch.page_start})</span>
+          <button class="bkp-del" onclick="bkpDelete(${idx})" title="Entfernen">×</button>
+        </div>`;
+      }
+      return `<div class="bkp-row">
+        <input type="checkbox" class="token-check" ${ch.enabled ? 'checked' : ''} onchange="bkpToggle(${idx},this.checked)">
+        <input type="text" class="bkp-title-input" value="${esc(ch.title)}" oninput="bkpSetTitle(${idx},this.value)" placeholder="Titel">
+        <input type="text" class="bkp-author-input" value="${esc(ch.author||'')}" oninput="bkpSetAuthor(${idx},this.value)" placeholder="Autor (optional)">
+        <input type="text" class="bkp-page-input" value="${ch.page_start}" oninput="bkpSetPage(${idx},this.value)">
+        <button class="bkp-del" onclick="bkpDelete(${idx})" title="Entfernen">×</button>
+      </div>`;
+    }).join('');
+  }
+
+  function bkpToggle(idx, val) {
+    bookPreviewChapters[idx].enabled = val;
+    const enabled = bookPreviewChapters.filter(c => !c.is_section && c.enabled).length;
+    document.getElementById('bkp-count').textContent = `(${enabled} ausgewählt)`;
+    document.getElementById('btn-bkp-run').textContent = `${enabled} Beiträge verarbeiten`;
+  }
+  function bkpSetTitle(idx, val) { bookPreviewChapters[idx].title = val; }
+  function bkpSetAuthor(idx, val) { bookPreviewChapters[idx].author = val || null; }
+  function bkpSetPage(idx, val) { bookPreviewChapters[idx].page_start = parseInt(val) || 1; }
+  function bkpDelete(idx) { bookPreviewChapters.splice(idx, 1); renderBkpList(); }
+
+  document.getElementById('btn-bkp-toggle').addEventListener('click', () => {
+    bkpAllSelected = !bkpAllSelected;
+    bookPreviewChapters.forEach(c => { if (!c.is_section) c.enabled = bkpAllSelected; });
+    document.getElementById('btn-bkp-toggle').textContent = bkpAllSelected ? 'Alle ✓' : 'Alle ☐';
+    renderBkpList();
+  });
+
+  document.getElementById('btn-bkp-add').addEventListener('click', () => {
+    bookPreviewChapters.push({ chapter: 0, title: '', page_start: 1, author: null, is_section: false, enabled: true });
+    renderBkpList();
+  });
+
+  document.getElementById('bkp-reparse-toggle').addEventListener('click', () => {
+    const body = document.getElementById('bkp-reparse-body');
+    const chev = document.getElementById('bkp-reparse-chevron');
+    const open = body.style.display === 'none';
+    body.style.display = open ? 'block' : 'none';
+    chev.classList.toggle('open', open);
+  });
+
+  document.getElementById('btn-bkp-reparse-pages').addEventListener('click', async () => {
+    const from = document.getElementById('bkp-page-from').value.trim();
+    const to = document.getElementById('bkp-page-to').value.trim();
+    if (!from || !to) { showToast('Bitte Seitenbereich eingeben'); return; }
+    await bkpReparse({ page_range: `${from}-${to}` });
+  });
+
+  document.getElementById('btn-bkp-reparse-text').addEventListener('click', async () => {
+    const text = document.getElementById('bkp-toc-text').value.trim();
+    if (!text) { showToast('Bitte TOC-Text eingeben'); return; }
+    await bkpReparse({ toc_text: text });
+  });
+
+  async function bkpReparse(extra) {
+    try {
+      const r = await fetch(`${API}/process/book/reparse`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdf_id: bookPreviewData.pdf_id, ...extra }),
+      });
+      const data = await r.json();
+      if (r.ok && data.chapters) {
+        bookPreviewChapters = data.chapters.map(c => ({...c}));
+        renderBkpList();
+        showToast(`${data.chapters.length} Einträge erkannt`);
+      } else {
+        showToast(data.detail || 'Fehler beim Parsen');
+      }
+    } catch { showToast('Backend nicht erreichbar'); }
+  }
+
+  document.getElementById('btn-bkp-run').addEventListener('click', async () => {
+    const active = bookPreviewChapters.filter(c => !c.is_section && c.enabled);
+    if (!active.length) { showToast('Keine Beiträge ausgewählt'); return; }
+    const btn = document.getElementById('btn-bkp-run');
+    btn.disabled = true;
+    showProgress();
+    try {
+      const r = await fetch(`${API}/process/book/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pdf_id: bookPreviewData.pdf_id, model: selectedModel, chapters: bookPreviewChapters }),
+      });
+      const data = await r.json();
+      if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); return; }
+      bookPreviewData = null;
+      bookPreviewChapters = [];
+      showPage('home');
+      const chapCount = data.chapters ? data.chapters.length : 0;
+      const errCount = data.errors ? data.errors.length : 0;
+      const chapDetails = (data.chapters || []).map(c =>
+        `<br><small style="color:var(--text2)">Kap. ${c.chapter}: ${c.links ?? '?'} Links, ${c.new_terms ?? '?'} Begriffe — ${c.title}${c.author ? ' (' + c.author + ')' : ''}</small>`
+      ).join('');
+      setStatus('success',
+        `Buch verarbeitet: <strong>${data.book_title || data.folder}</strong><br>` +
+        `${chapCount} Kapitel in <code>Bücher/${data.folder}/</code>` +
+        (errCount > 0 ? `<br>${errCount} Kapitel mit Fehler` : '') + chapDetails
+      );
+      showToast(`${chapCount} Kapitel gespeichert ✓`);
+      loadVaultTree();
+      resetDrop();
+    } catch { showToast('Backend nicht erreichbar'); }
+    finally { btn.disabled = false; hideProgress(); }
+  });
+
+  document.getElementById('btn-bkp-back').addEventListener('click', () => {
+    bookPreviewData = null;
+    bookPreviewChapters = [];
+    showPage('home');
   });
 
   // Init
