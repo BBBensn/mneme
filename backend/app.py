@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import logging
@@ -954,12 +955,26 @@ def _fill_page_ends(chapters: list[dict], total_pages: int) -> None:
 
 def parse_toc_regex(toc_text: str) -> list[dict]:
     """Parse TOC entries via regex. Returns list with title/page_start/author/is_section/enabled."""
-    lines = toc_text.split('\n')
+    _page_re = re.compile(r'[\s.·•–]{2,}\d{1,4}\s*$')
+    raw = [l.strip() for l in toc_text.split('\n')]
+    # Merge continuation lines: a line without page number directly before a line with one
+    merged: list[str] = []
+    i = 0
+    while i < len(raw):
+        line = raw[i]
+        if (line and not _page_re.search(line) and not _is_author_line(line) and
+                i + 1 < len(raw) and _page_re.search(raw[i + 1])):
+            raw[i + 1] = line + ' ' + raw[i + 1]
+            i += 1
+            continue
+        merged.append(line)
+        i += 1
+    lines = merged
     result = []
     chapter_num = 0
     i = 0
     while i < len(lines):
-        line = lines[i].strip()
+        line = lines[i]
         m = re.match(r'^(.+?)[\s.·•–]{2,}(\d{1,4})\s*$', line)
         if m:
             title = m.group(1).strip()
@@ -1683,6 +1698,76 @@ async def process_book_run(req: BookRunRequest):
             "status": "book_ready", "folder": folder_name,
             "book_title": book_meta.get("title", ""),
             "chapters": processed_chapters, "errors": errors,
+        }
+    finally:
+        _processing_status["active"] = False
+        _processing_status["stage"] = ""
+
+
+@app.post("/process/book/run_dry")
+async def process_book_run_dry(req: BookRunRequest):
+    global _processing_status
+    if req.pdf_id not in _pending_book_pdf:
+        raise HTTPException(status_code=404, detail="pdf_not_found")
+    _processing_status = {"active": True, "stage": "[DRY RUN] Vorbereitung...", "progress": 0.02,
+                          "chunk_current": 0, "chunk_total": 0}
+    try:
+        cfg = load_config()
+        vault_path = cfg.get("vault_path", "")
+        if not vault_path or not Path(vault_path).is_dir():
+            raise HTTPException(status_code=400, detail="vault_path_not_set")
+
+        stored = _pending_book_pdf[req.pdf_id]
+        pdf_filename = stored["filename"]
+
+        active = [c for c in req.chapters if c.get("enabled", True) and not c.get("is_section", False)]
+        if not active:
+            raise HTTPException(status_code=400, detail="no_chapters_selected")
+        for i, ch in enumerate(active):
+            ch["chapter"] = i + 1
+
+        book_meta = {"title": re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem)[:80].strip(), "author": "", "year": ""}
+        folder_name = derive_output_filename(book_meta, pdf_filename).replace(".md", "")
+        book_dir = Path(vault_path) / "Bücher" / folder_name
+        book_dir.mkdir(parents=True, exist_ok=True)
+
+        n = len(active)
+        _processing_status["chunk_total"] = n
+        processed_chapters: list[dict] = []
+        overview_link = f"Bücher/{folder_name}/00-Uebersicht"
+        book_title_safe = book_meta.get("title", "").replace('"', "'")
+
+        for i, ch in enumerate(active):
+            chapter_num = ch.get("chapter", i + 1)
+            chapter_title = ch.get("title", f"Kapitel {chapter_num}")
+            chapter_author = ch.get("author")
+            _processing_status["stage"] = f"[DRY RUN] {chapter_num}/{n}: {chapter_title[:35]}"
+            _processing_status["progress"] = 0.10 + 0.82 * (i / n)
+            _processing_status["chunk_current"] = chapter_num
+            await asyncio.sleep(0.5)
+            author_field = f"author: {chapter_author}\n" if chapter_author else ""
+            chapter_filename = derive_chapter_filename(chapter_num, chapter_title)
+            frontmatter = (
+                f"---\ntitle: {yaml_str(chapter_title)}\n{author_field}chapter: {chapter_num}\n"
+                f'book: "[[{overview_link}|{book_title_safe}]]"\n'
+                f"tags:\n  - book-chapter\nsource_pdf: {yaml_str(pdf_filename)}\n"
+                f"mneme_version: {MNEME_VERSION}\n---\n\n"
+                f"> Teil von [[{overview_link}|{book_title_safe}]] *(Dry-Run)*\n\n"
+                f"## Volltext\n\n*[Dry-run — kein Inhalt]*\n"
+            )
+            (book_dir / chapter_filename).write_text(frontmatter, encoding="utf-8")
+            processed_chapters.append({
+                "chapter": chapter_num, "title": chapter_title,
+                "filename": chapter_filename, "author": chapter_author,
+                "links": 0, "new_terms": 0,
+            })
+
+        _write_book_overview(book_dir, book_meta, folder_name, pdf_filename)
+        logger.info("BUCH DRY-RUN FERTIG: %d Kapitel | %s", n, folder_name)
+        return {
+            "status": "book_ready", "folder": folder_name,
+            "book_title": book_meta.get("title", ""),
+            "chapters": processed_chapters, "errors": [],
         }
     finally:
         _processing_status["active"] = False

@@ -12,7 +12,7 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 ## Projekt-Basics
 
 - **Name:** mneme
-- **Version:** v2.9.9
+- **Version:** v2.9.10
 - **Status:** active
 - **Stack:** Vanilla JS + FastAPI + pymupdf + Ollama + Anthropic SDK
 - **Läuft lokal auf:** MacBook (kein Server-Deploy)
@@ -184,7 +184,8 @@ date_modified: 2026-05-14 14:45:00
 | v2.9.1–7 | Speichern-Bug, Author, Dataview, Buch-Fixes, TOC-Preview | ✅ done |
 | v2.9.8  | Buch-Preview Layout, Von/Bis-Spalten, Autoren-Toggle, Warnung-Fix | ✅ done |
 | v2.9.9  | Layout Grid Final, Warnung-Logik reaktiv, Version 2.9.9 | ✅ done  |
-| v2.9.10 | Vault-weites Re-Linking (Python-only)                | geplant     |
+| v2.9.10 | TOC Fix, Wrapper 900px, Dry-Run, mneme.md Update     | ✅ done     |
+| v2.9.11 | Vault-weites Re-Linking (Python-only)                | geplant     |
 | v3.0    | Token-Verwaltung Bubble+Tree UI                      | geplant     |
 | v3.1    | Review-Umbau + Multi-File Queue                      | geplant     |
 | v3.x    | Graph-UI, Literatursuche via Claude                  | geplant     |

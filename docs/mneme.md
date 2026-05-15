@@ -4,7 +4,7 @@ type: project
 status: active
 bereich: coding
 tags: [project]
-date_modified: 2026-05-14 10:12:00
+date_modified: 2026-05-15 17:00:00
 ---
 
 ---
@@ -75,22 +75,24 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.9.5 Dateiname-Fix, Duplikat-Warnung ✅ 2026-05-15
 - [x] v2.9.6 Dateiname Leerzeichen-Fix, Duplikat-Warnung via source_pdf ✅ 2026-05-15
 - [x] v2.9.7 Buch-Modus mehrstufig: TOC-Preview, Sammelband-Erkennung ✅ 2026-05-15
-- [ ] v3.0 Vault Explorer: Token-Liste, Merge-UI
-- [ ] v3.1 Buch-Modus Review-Screen
-- [ ] v3.2 Bulk-Verarbeitung (RAW-Data Batch)
-- [ ] v3.1 Bulk-Verarbeitung (RAW-Data Batch)
+- [x] v2.9.8–2.9.10 Buch-Preview Layout, Warnung-Logik, TOC-Fix, Dry-Run ✅ 2026-05-15
+- [ ] v2.9.11 Vault-weites Re-Linking (Python-only)
+- [ ] v3.0 Token-Verwaltung Bubble+Tree UI
+- [ ] v3.1 Review-Umbau + Multi-File Queue
 - [ ] v3.x Graph-UI, Literatursuche via Claude API
 
 ## Offene Fragen / Bekannte Probleme
 
-- **Speichern-Bug:** Behoben in v2.9.1. Ursache war fehlender Button-Reset (`btn.disabled = false`) in der Success-Branch des Confirm-Handlers — DOM-Button blieb disabled und war beim nächsten Review ausgegraut.
 - **tokens.json Skalierung:** Wie gut skaliert bei 100+ Papers? Ab wann wird Lookup langsam?
-- **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks (gebatchte Aufrufe: >5 Batches) noch ungeprüft ob Ollama die größeren Input-Texte korrekt verarbeitet.
-- **Buch-Modus Kapitel-Fehler:** Kapitel-Erkennung in v2.9.3 verbessert (progressives Matching, 25 Seiten TOC). Beim nächsten Auftreten mneme.log prüfen (exc_info=True aktiv).
+- **Ollama-Qualität bei sehr langen Papers:** Bei >15 Chunks noch ungeprüft ob Ollama größere Input-Texte korrekt verarbeitet.
+- **Buch-Modus Verarbeitungszeit:** ~1h für große Sammelbände mit Ollama (viele Kapitel × Ollama-Latenz).
+- **Mehrzeilige TOC-Titel:** Werden erst ab v2.9.10 korrekt geparst (Preprocessing-Schritt in parse_toc_regex).
+- **Vault-weites Re-Linking:** Noch nicht implementiert — bestehende Notes werden nach Token-Updates nicht automatisch re-verlinkt.
+- **Dry-Run:** Verfügbar für Tests via `localStorage.setItem('mneme_debug','true')` in der Browser-Konsole.
 
 ## Stack & Infrastruktur
 
-**Stack:** FastAPI (Python, Port 5050) + Vanilla JS Frontend + pymupdf + Ollama (llama3.1:8b) + Anthropic SDK (claude-haiku-4-5)
+**Stack:** FastAPI (Python, Port 5050) + Vanilla JS Frontend + pymupdf + Ollama (llama3.1:8b) + Anthropic SDK (claude-haiku-4-5-20251001)
 
 **Workflow Auto-Modus:**
 
@@ -114,6 +116,8 @@ Vault/
 ├── [Autor-Jahr-Titel].md
 └── tokens.json
 ```
+
+**Neue Endpoints (Buch-Modus):** `/process/book/preview`, `/process/book/reparse`, `/process/book/run`, `/process/book/run_dry`, `/check/duplicate`
 
 **Repo:** https://github.com/BBBensn/mneme **Lokaler Pfad:** `~/Documents/Coding/J-Vault/mneme/` **Port:** 5050
 
