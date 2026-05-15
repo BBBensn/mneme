@@ -905,6 +905,13 @@ def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
     return result
 
 
+def _pdf_page_from_printed(page_end: int | None, doc_len: int) -> int:
+    """Convert printed page_end to a capped PDF page index."""
+    if page_end is None:
+        return doc_len
+    return min(max(0, page_end - 1), doc_len)
+
+
 def _is_author_line(s: str) -> bool:
     """Heuristic: does this line look like an author attribution (not a chapter title)?"""
     if not s or not s[0].isupper() or len(s) > 120:
@@ -931,6 +938,18 @@ def detect_book_type(toc_text: str, front_pages_text: str) -> str:
     elif author_lines >= 1:
         score += 1
     return "sammelband" if score >= 2 else "monographie"
+
+
+def _fill_page_ends(chapters: list[dict], total_pages: int) -> None:
+    """Fill page_end=None entries: next chapter's page_start-1, or total_pages for the last."""
+    non_sections = [c for c in chapters if not c.get("is_section")]
+    for i, ch in enumerate(non_sections):
+        if ch.get("page_end") is not None:
+            continue
+        if i + 1 < len(non_sections):
+            ch["page_end"] = non_sections[i + 1]["page_start"] - 1
+        else:
+            ch["page_end"] = total_pages
 
 
 def parse_toc_regex(toc_text: str) -> list[dict]:
@@ -963,6 +982,7 @@ def parse_toc_regex(toc_text: str) -> list[dict]:
                 "chapter": chapter_num if not is_section else 0,
                 "title": title,
                 "page_start": page_start,
+                "page_end": None,
                 "author": author,
                 "is_section": is_section,
                 "enabled": not is_section,
@@ -1564,7 +1584,7 @@ async def process_book_preview(file: UploadFile = File(...), model: str = "auto"
                 claude_chs = parse_chapter_structure(raw)
                 if len(claude_chs) > len(chapters):
                     chapters = [
-                        {**ch, "author": None, "is_section": False, "enabled": True}
+                        {**ch, "page_end": None, "author": None, "is_section": False, "enabled": True}
                         for ch in claude_chs
                     ]
             except Exception as e:
@@ -1575,6 +1595,7 @@ async def process_book_preview(file: UploadFile = File(...), model: str = "auto"
             del _pending_book_pdf[next(iter(_pending_book_pdf))]
         _pending_book_pdf[pdf_id] = {"bytes": pdf_bytes, "filename": file.filename or "book.pdf"}
 
+        _fill_page_ends(chapters, total_pages)
         logger.info("BOOK PREVIEW: type=%s, chapters=%d, id=%s", book_type, len(chapters), pdf_id)
         return {"pdf_id": pdf_id, "book_type": book_type, "title": book_title,
                 "total_pages": total_pages, "chapters": chapters}
@@ -1717,7 +1738,10 @@ async def _execute_book_chapters(
         chapter_title = chapter.get("title", f"Kapitel {chapter_num}")
         chapter_author = chapter.get("author")
         pdf_start = chapter.get("pdf_page", 0)
-        pdf_end = chapters_with_pages[i + 1].get("pdf_page", len(doc)) if i + 1 < n else len(doc)
+        if i + 1 < n:
+            pdf_end = chapters_with_pages[i + 1].get("pdf_page", len(doc))
+        else:
+            pdf_end = _pdf_page_from_printed(chapter.get("page_end"), len(doc))
         chapter_text = "\n\n".join(
             doc[p].get_text() for p in range(pdf_start, min(pdf_end, len(doc)))
         ).strip()

@@ -434,13 +434,15 @@
     .tbadge.noise { background: rgba(255,59,48,0.07); color: var(--danger); }
 
     /* Book preview */
-    .bkp-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--border); }
+    .bkp-row { display:flex; align-items:center; gap:6px; padding:5px 0; border-bottom:1px solid var(--border); width:100%; }
     .bkp-row:last-child { border-bottom:none; }
-    .bkp-row.section { opacity:0.55; }
-    .bkp-title-input { flex:2; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
-    .bkp-author-input { flex:1.3; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
-    .bkp-page-input { width:54px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
-    .bkp-del { background:none; border:none; cursor:pointer; color:var(--text2); padding:2px 5px; font-size:17px; flex-shrink:0; line-height:1; }
+    .bkp-row.section { color:#999; font-size:12px; }
+    .bkp-row input[type="checkbox"] { width:20px; flex-shrink:0; }
+    .bkp-title-input { flex:3; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
+    .bkp-author-input { flex:2; min-width:0; padding:5px 8px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); }
+    .bkp-page-input { width:52px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
+    .bkp-end-input { width:52px; flex-shrink:0; padding:5px 6px; font-size:13px; border:1.5px solid var(--border); border-radius:6px; color:var(--text); background:var(--surface); text-align:center; }
+    .bkp-del { width:24px; background:none; border:none; cursor:pointer; color:var(--text2); padding:2px 4px; font-size:17px; flex-shrink:0; line-height:1; }
     .bkp-del:hover { color:var(--danger); }
     .bkp-type-badge { font-size:11px; padding:1px 6px; border-radius:8px; background:rgba(255,159,10,0.12); color:#7a4a00; white-space:nowrap; flex-shrink:0; }
 
@@ -793,6 +795,7 @@
       <div class="section-header" style="margin-bottom:8px">
         <div class="section-label">Beiträge <span id="bkp-count" style="font-weight:400"></span></div>
         <div style="display:flex;gap:8px">
+          <button class="btn-secondary" id="btn-bkp-authors" style="font-size:12px;padding:5px 12px">Autoren</button>
           <button class="btn-secondary" id="btn-bkp-toggle" style="font-size:12px;padding:5px 12px">Alle ✓</button>
           <button class="btn-secondary" id="btn-bkp-add" style="font-size:12px;padding:5px 12px">+ Beitrag</button>
         </div>
@@ -922,6 +925,7 @@
   let bookPreviewData = null;
   let bookPreviewChapters = [];
   let bkpAllSelected = true;
+  let bkpAuthorVisible = false;
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -1106,6 +1110,7 @@
       processingType = btn.dataset.type;
       document.getElementById('type-sub-text').textContent =
         processingType === 'book' ? 'Buchkapitel werden einzeln verarbeitet' : 'Wissenschaftlicher Artikel';
+      if (processingType === 'book') clearStatus();
     });
   });
 
@@ -1876,6 +1881,27 @@
     }
   }
 
+  function bkpAutoFillPageEnds() {
+    const total = bookPreviewData?.total_pages ?? 9999;
+    const nonSections = bookPreviewChapters.filter(c => !c.is_section);
+    for (let i = 0; i < nonSections.length; i++) {
+      if (nonSections[i].page_end != null) continue;
+      nonSections[i].page_end = i + 1 < nonSections.length
+        ? nonSections[i + 1].page_start - 1
+        : total;
+    }
+  }
+
+  function bkpSetAuthorVisible(visible) {
+    bkpAuthorVisible = visible;
+    localStorage.setItem('bkpAuthorVisible', visible ? '1' : '0');
+    const btn = document.getElementById('btn-bkp-authors');
+    if (btn) btn.textContent = visible ? 'Autoren ✓' : 'Autoren';
+    document.querySelectorAll('.bkp-author-input').forEach(el => {
+      el.style.display = visible ? 'block' : 'none';
+    });
+  }
+
   function renderBookPreview() {
     if (!bookPreviewData) return;
     document.getElementById('bkp-title').textContent = bookPreviewData.title || 'Buchanalyse';
@@ -1883,6 +1909,14 @@
       ? '<span style="background:rgba(255,159,10,0.12);color:#7a4a00;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Sammelband</span>'
       : '<span style="background:rgba(0,113,227,0.08);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Monographie</span>';
     document.getElementById('bkp-meta').innerHTML = `${typeBadge} · ${bookPreviewData.total_pages} Seiten`;
+    bkpAutoFillPageEnds();
+    // Author column default: visible if any chapter has author
+    const savedVis = localStorage.getItem('bkpAuthorVisible');
+    if (savedVis !== null) {
+      bkpAuthorVisible = savedVis === '1';
+    } else {
+      bkpAuthorVisible = bookPreviewChapters.some(c => c.author);
+    }
     renderBkpList();
   }
 
@@ -1890,18 +1924,22 @@
     const enabled = bookPreviewChapters.filter(c => !c.is_section && c.enabled).length;
     document.getElementById('bkp-count').textContent = `(${enabled} ausgewählt)`;
     document.getElementById('btn-bkp-run').textContent = `${enabled} Beiträge verarbeiten`;
+    document.getElementById('btn-bkp-authors').textContent = bkpAuthorVisible ? 'Autoren ✓' : 'Autoren';
+    const authorDisplay = bkpAuthorVisible ? 'block' : 'none';
     document.getElementById('bkp-chapter-list').innerHTML = bookPreviewChapters.map((ch, idx) => {
       if (ch.is_section) {
         return `<div class="bkp-row section">
-          <span style="flex:1;font-size:13px;color:var(--text2);font-style:italic">— ${esc(ch.title)} (S. ${ch.page_start})</span>
-          <button class="bkp-del" onclick="bkpDelete(${idx})" title="Entfernen">×</button>
+          <span style="flex:1">— ${esc(ch.title)} —</span>
+          <span style="margin-left:auto;white-space:nowrap">S. ${ch.page_start}</span>
         </div>`;
       }
+      const pageEndVal = ch.page_end != null ? ch.page_end : '';
       return `<div class="bkp-row">
-        <input type="checkbox" class="token-check" ${ch.enabled ? 'checked' : ''} onchange="bkpToggle(${idx},this.checked)">
+        <input type="checkbox" ${ch.enabled ? 'checked' : ''} onchange="bkpToggle(${idx},this.checked)">
+        <input type="text" class="bkp-page-input" value="${ch.page_start}" oninput="bkpSetPage(${idx},this.value)" title="Von">
+        <input type="text" class="bkp-end-input" value="${pageEndVal}" oninput="bkpSetPageEnd(${idx},this.value)" title="Bis">
         <input type="text" class="bkp-title-input" value="${esc(ch.title)}" oninput="bkpSetTitle(${idx},this.value)" placeholder="Titel">
-        <input type="text" class="bkp-author-input" value="${esc(ch.author||'')}" oninput="bkpSetAuthor(${idx},this.value)" placeholder="Autor (optional)">
-        <input type="text" class="bkp-page-input" value="${ch.page_start}" oninput="bkpSetPage(${idx},this.value)">
+        <input type="text" class="bkp-author-input" value="${esc(ch.author||'')}" oninput="bkpSetAuthor(${idx},this.value)" placeholder="Autor (optional)" style="display:${authorDisplay}">
         <button class="bkp-del" onclick="bkpDelete(${idx})" title="Entfernen">×</button>
       </div>`;
     }).join('');
@@ -1916,6 +1954,7 @@
   function bkpSetTitle(idx, val) { bookPreviewChapters[idx].title = val; }
   function bkpSetAuthor(idx, val) { bookPreviewChapters[idx].author = val || null; }
   function bkpSetPage(idx, val) { bookPreviewChapters[idx].page_start = parseInt(val) || 1; }
+  function bkpSetPageEnd(idx, val) { bookPreviewChapters[idx].page_end = val ? (parseInt(val) || null) : null; }
   function bkpDelete(idx) { bookPreviewChapters.splice(idx, 1); renderBkpList(); }
 
   document.getElementById('btn-bkp-toggle').addEventListener('click', () => {
@@ -1925,8 +1964,12 @@
     renderBkpList();
   });
 
+  document.getElementById('btn-bkp-authors').addEventListener('click', () => {
+    bkpSetAuthorVisible(!bkpAuthorVisible);
+  });
+
   document.getElementById('btn-bkp-add').addEventListener('click', () => {
-    bookPreviewChapters.push({ chapter: 0, title: '', page_start: 1, author: null, is_section: false, enabled: true });
+    bookPreviewChapters.push({ chapter: 0, title: '', page_start: 1, page_end: null, author: null, is_section: false, enabled: true });
     renderBkpList();
   });
 
@@ -1961,6 +2004,7 @@
       const data = await r.json();
       if (r.ok && data.chapters) {
         bookPreviewChapters = data.chapters.map(c => ({...c}));
+        bkpAutoFillPageEnds();
         renderBkpList();
         showToast(`${data.chapters.length} Einträge erkannt`);
       } else {
