@@ -664,16 +664,15 @@ def check_alias_conflict(new_canonical: str, existing_tokens: dict) -> str | Non
 
 
 def format_author_yaml(author_str: str, authors_list: list[str]) -> str:
-    """Format author YAML with [[wikilinks]] for all authors."""
+    """Format author YAML as plain text (no wikilinks — Dataview string() strips them anyway)."""
     if not author_str:
         return "author: ''\n"
     first = get_author_stub_name(authors_list[0] if authors_list else author_str)
-    result = f"author: {yaml_str(f'[[{first}]]')}\n"
+    result = f"author: {first}\n"
     if len(authors_list) > 1:
         result += "authors:\n"
         for a in authors_list:
-            name = get_author_stub_name(a)
-            result += f"  - {yaml_str(f'[[{name}]]')}\n"
+            result += f"  - {get_author_stub_name(a)}\n"
     return result
 
 
@@ -882,7 +881,7 @@ def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
     result = []
     for ch in chapters:
         title = ch.get("title", "")
-        page_hint = max(0, ch.get("page_start", 1) - 3)
+        page_hint = max(0, int(ch.get("page_start") or 1) - 3)
         found_page = None
         # Try progressively shorter substrings of the title (longest first)
         for frac in (1.0, 0.66, 0.33):
@@ -897,7 +896,7 @@ def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
             if found_page is not None:
                 break
         if found_page is None:
-            found_page = max(0, ch.get("page_start", 1) - 2)
+            found_page = max(0, int(ch.get("page_start") or 1) - 2)
         result.append({**ch, "pdf_page": found_page})
     return result
 
@@ -1123,7 +1122,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "2.9.3"
+MNEME_VERSION = "2.9.4"
 
 
 @app.get("/version")
@@ -1683,7 +1682,7 @@ def fix_dataview_query():
 
 @app.post("/authors/fix-author-field")
 def fix_author_field():
-    """Fix literature notes: replace double-quoted author wikilinks with single-quoted."""
+    """Fix literature notes: strip wikilink brackets from author fields (plain text for Dataview)."""
     cfg = load_config()
     vault_path = cfg.get("vault_path", "")
     if not vault_path or not Path(vault_path).is_dir():
@@ -1694,11 +1693,19 @@ def fix_author_field():
             content = md_file.read_text(encoding="utf-8")
             if "literature-note" not in content[:500]:
                 continue
-            # Replace author: "[[...]]" (double quotes) → author: '[[...]]' (single quotes)
+            new_content = content
+            # author: '[[Name]]' or "[[Name]]" → author: Name
             new_content = re.sub(
-                r'^(author:\s*)"(\[\[.*?\]\])"',
-                r"\1'\2'",
-                content,
+                r"^(author:\s*)['\"]?\[\[([^\]]+)\]\]['\"]?",
+                r"\1\2",
+                new_content,
+                flags=re.MULTILINE,
+            )
+            # authors list: '  - '[[Name]]'' or "[[Name]]" → '  - Name'
+            new_content = re.sub(
+                r"^(\s+-\s+)['\"]?\[\[([^\]]+)\]\]['\"]?",
+                r"\1\2",
+                new_content,
                 flags=re.MULTILINE,
             )
             if new_content != content:

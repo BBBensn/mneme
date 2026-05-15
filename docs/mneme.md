@@ -71,6 +71,7 @@ Teilprojekt von [[J-Vault]].
 - [x] v2.9.1 Speichern-Bug Fix ✅ 2026-05-14
 - [x] v2.9.2 Author-Parse Fix, Dataview Fix, Buch-Modus Debug ✅ 2026-05-14
 - [x] v2.9.3 Titel-Fix, Dataview-Fix, Buch-Kapitel-Fix, Token-Accumulation ✅ 2026-05-14
+- [x] v2.9.4 Author Plain Text, Buch-Crash Fix, Buch-Warnung ✅ 2026-05-15
 - [ ] v3.0 Vault Explorer: Token-Liste, Merge-UI
 - [ ] v3.1 Buch-Modus Review-Screen
 - [ ] v3.2 Bulk-Verarbeitung (RAW-Data Batch)

@@ -971,6 +971,25 @@
     dropZone.querySelector('.drop-sub').textContent = formatBytes(f.size);
     btnProcess.disabled = false;
     clearStatus();
+    // Buch-Modus Hinweis für große Dokumente im Artikel-Modus
+    if (processingType === 'article' && f.size > 3 * 1024 * 1024) {
+      const sizeMb = (f.size / 1024 / 1024).toFixed(1);
+      setStatus('info',
+        `Großes Dokument (~${sizeMb} MB). Buch-Modus könnte besser geeignet sein und läuft schneller. ` +
+        `<a href="#" id="switch-to-book" style="color:var(--accent);font-weight:500">→ Zum Buch-Modus wechseln</a>`
+      );
+      setTimeout(() => {
+        const link = document.getElementById('switch-to-book');
+        if (link) link.addEventListener('click', e => {
+          e.preventDefault();
+          document.getElementById('type-toggle').querySelectorAll('button').forEach(b => b.classList.remove('active'));
+          document.querySelector('[data-type="book"]').classList.add('active');
+          processingType = 'book';
+          document.getElementById('type-sub-text').textContent = 'Buchkapitel werden einzeln verarbeitet';
+          clearStatus();
+        });
+      }, 0);
+    }
   }
 
   function formatBytes(b) {
