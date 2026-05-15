@@ -102,6 +102,7 @@
       transition: color 0.15s, background 0.15s;
     }
     .btn-icon:hover { color: var(--text); background: var(--surface2); }
+    .btn-icon.active { color: var(--accent); }
     .btn-icon.hidden { visibility: hidden; pointer-events: none; }
 
     /* Main layout */
@@ -964,11 +965,19 @@
     document.querySelector('main').classList.toggle('wide', page === 'book-preview');
     const onReview = page === 'review';
     const onBkp = page === 'book-preview';
-    btnSettings.classList.toggle('hidden', page === 'settings' || onReview || onBkp);
+    // Active highlight for current page
+    btnSettings.classList.toggle('active', page === 'settings');
+    btnHome.classList.toggle('active', page === 'home');
+    btnTokens.classList.toggle('active', page === 'tokens');
+    btnBulk.classList.toggle('active', page === 'bulk');
+    btnJobs.classList.toggle('active', page === 'jobs');
+    // Hide all nav icons on review/book-preview; hide home on home page
+    const hideAll = onReview || onBkp;
+    btnSettings.classList.toggle('hidden', hideAll);
+    btnTokens.classList.toggle('hidden', hideAll);
+    btnBulk.classList.toggle('hidden', hideAll);
+    btnJobs.classList.toggle('hidden', hideAll);
     btnHome.classList.toggle('hidden', page === 'home');
-    btnTokens.classList.toggle('hidden', page === 'tokens' || onReview || onBkp);
-    btnBulk.classList.toggle('hidden', page === 'bulk' || onReview || onBkp);
-    btnJobs.classList.toggle('hidden', page === 'jobs' || onReview || onBkp);
     if (page === 'settings') loadSettings();
     if (page === 'tokens') loadTokenPage();
     if (page === 'review') renderReview();

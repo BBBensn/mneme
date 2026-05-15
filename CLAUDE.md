@@ -12,7 +12,7 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 ## Projekt-Basics
 
 - **Name:** mneme
-- **Version:** v2.9.12
+- **Version:** v2.9.13
 - **Status:** active
 - **Stack:** Vanilla JS + FastAPI + pymupdf + Ollama + Anthropic SDK
 - **Läuft lokal auf:** MacBook (kein Server-Deploy)
@@ -187,6 +187,7 @@ date_modified: 2026-05-14 14:45:00
 | v2.9.10 | TOC Fix, Wrapper 900px, Dry-Run, mneme.md Update     | ✅ done     |
 | v2.9.11 | Titel-Fix, Autoren-Fix, Tooltip, Vault-Relinking     | ✅ done     |
 | v2.9.12 | Titel kein Limit, André-Fix, Icon-Fix, Token-Cleanup | ✅ done     |
+| v2.9.13 | Nav-Icon Active State Fix                            | ✅ done     |
 | v3.0.0  | Review-Rebuild + Multi-File Queue                    | geplant     |
 | v3.0.1  | Link-Merging Bubble+Tree UI                          | geplant     |
 | v3.0    | Token-Verwaltung Bubble+Tree UI                      | geplant     |
