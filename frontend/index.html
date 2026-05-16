@@ -793,7 +793,8 @@
 
     <div class="card">
       <div style="margin-bottom:16px">
-        <div class="card-title" id="bkp-title" style="margin-bottom:4px">Buchanalyse</div>
+        <label style="font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:4px">Buchtitel</label>
+        <input type="text" id="bkp-title-input" style="width:100%;font-size:15px;font-weight:600;padding:8px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
         <div id="bkp-meta" style="font-size:13px;color:var(--text2)"></div>
       </div>
       <div class="section-header" style="margin-bottom:8px">
@@ -838,6 +839,20 @@
       <button class="btn-primary" id="btn-bkp-run" style="flex:1">Verarbeiten</button>
     </div>
 
+  </div>
+
+  <!-- Book processing page -->
+  <div class="page" id="page-book-processing">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:0">Buch wird verarbeitet…</div>
+        <div id="bkp-proc-timer" style="font-size:13px;color:var(--text2)">0:00</div>
+      </div>
+      <div id="bkp-proc-stage" style="font-size:13px;color:var(--text2);margin-bottom:10px;min-height:18px"></div>
+      <div class="progress-bar-wrap active">
+        <div class="progress-bar indeterminate" id="bkp-proc-bar"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Queue page -->
@@ -1060,11 +1075,12 @@
     pageBulk.classList.toggle('active', page === 'bulk');
     pageJobs.classList.toggle('active', page === 'jobs');
     pageBookPreview.classList.toggle('active', page === 'book-preview');
+    document.getElementById('page-book-processing').classList.toggle('active', page === 'book-processing');
     document.getElementById('page-queue').classList.toggle('active', page === 'queue');
     document.getElementById('page-queue-progress').classList.toggle('active', page === 'queue-progress');
     document.querySelector('main').classList.toggle('wide', page === 'book-preview');
     const onReview = page === 'review';
-    const onBkp = page === 'book-preview';
+    const onBkp = page === 'book-preview' || page === 'book-processing';
     const onQueue = page === 'queue' || page === 'queue-progress';
     btnSettings.classList.toggle('active', page === 'settings');
     btnHome.classList.toggle('active', page === 'home');
@@ -1323,7 +1339,13 @@
       </div>`;
     }).join('');
     const allDone = activeJobs.every(j => j.status === 'done' || j.status === 'error' || j.status === 'cancelled');
-    document.getElementById('qp-all-done').style.display = allDone ? 'block' : 'none';
+    const hasDone = activeJobs.some(j => j.status === 'done');
+    if (allDone && !hasDone) {
+      if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = null; }
+      showPage('home');
+    } else {
+      document.getElementById('qp-all-done').style.display = allDone ? 'block' : 'none';
+    }
   }
 
   async function cancelQueueJob(jobId) {
@@ -2207,7 +2229,7 @@
 
   function renderBookPreview() {
     if (!bookPreviewData) return;
-    document.getElementById('bkp-title').textContent = bookPreviewData.title || 'Buchanalyse';
+    document.getElementById('bkp-title-input').value = bookPreviewData.title || '';
     const typeBadge = bookPreviewData.book_type === 'sammelband'
       ? '<span style="background:rgba(255,159,10,0.12);color:#7a4a00;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Sammelband</span>'
       : '<span style="background:rgba(0,113,227,0.08);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Monographie</span>';
@@ -2318,55 +2340,86 @@
   }
 
   document.getElementById('btn-bkp-run').addEventListener('click', async () => {
-    const active = bookPreviewChapters.filter(c => !c.is_section && c.enabled);
-    if (!active.length) { showToast('Keine Beiträge ausgewählt'); return; }
+    const activeChapters = bookPreviewChapters.filter(c => !c.is_section && c.enabled);
+    if (!activeChapters.length) { showToast('Keine Beiträge ausgewählt'); return; }
+
     const btn = document.getElementById('btn-bkp-run');
-    btn.disabled = true;
-    showProgress();
-    startPolling();  // #11: Fortschrittsanzeige während Buch-Verarbeitung
+    const backBtn = document.getElementById('btn-bkp-back');
+    const chapterList = document.getElementById('bkp-chapter-list');
+    const titleInput = document.getElementById('bkp-title-input');
+    const bookTitle = titleInput ? titleInput.value.trim() : '';
+
+    function _lockBkpInputs(lock) {
+      btn.disabled = lock;
+      backBtn.disabled = lock;
+      chapterList.style.opacity = lock ? '0.5' : '';
+      chapterList.querySelectorAll('input').forEach(el => { el.disabled = lock; });
+      if (titleInput) titleInput.disabled = lock;
+    }
+
+    _lockBkpInputs(true);
+    showPage('book-processing');
+
+    const bkpTimerEl = document.getElementById('bkp-proc-timer');
+    const bkpStageEl = document.getElementById('bkp-proc-stage');
+    const bkpBarEl = document.getElementById('bkp-proc-bar');
+    const procStart = Date.now();
+
+    const timerInterval = setInterval(() => {
+      bkpTimerEl.textContent = _fmtSec(Math.floor((Date.now() - procStart) / 1000));
+    }, 1000);
+    const pollInterval = setInterval(async () => {
+      try {
+        const sr = await fetch(`${API}/process/status`);
+        const ss = await sr.json();
+        if (ss.stage) bkpStageEl.textContent = ss.stage;
+        if (ss.progress >= 0.1) {
+          bkpBarEl.classList.remove('indeterminate');
+          bkpBarEl.style.width = `${Math.round(ss.progress * 100)}%`;
+        }
+      } catch {}
+    }, 2000);
+
+    function _stopBkpPolling() { clearInterval(timerInterval); clearInterval(pollInterval); }
+
+    let success = false;
     try {
       const r = await fetch(`${API}/process/book/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pdf_id: bookPreviewData.pdf_id, model: selectedModel, chapters: bookPreviewChapters }),
+        body: JSON.stringify({
+          pdf_id: bookPreviewData.pdf_id, model: selectedModel,
+          chapters: bookPreviewChapters,
+          ...(bookTitle && { book_title: bookTitle }),
+        }),
       });
       const data = await r.json();
       if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); return; }
 
+      success = true;
       if (data.status === 'book_review_ready') {
-        // #12: Buch-Review-Flow
         activeJobs = data.chapters.map(ch => ({
-          job_id: ch.job_id,
-          filename: ch.filename,
-          status: 'done',
-          stage: 'Fertig',
-          draft: {
-            tokens: ch.tokens || [],
-            stats: ch.stats,
-            cost: ch.cost,
-            meta: ch.meta || {},
-            content: ch.content || '',
-            filename: ch.filename,
-          },
+          job_id: ch.job_id, filename: ch.filename, status: 'done', stage: 'Fertig',
+          draft: { tokens: ch.tokens || [], stats: ch.stats, cost: ch.cost,
+                   meta: ch.meta || {}, content: ch.content || '', filename: ch.filename },
           error: null,
         }));
         bookReviewBookId = data.book_id;
-        savedJobIds = new Set();
-        reviewDrafts = {};
-        reviewJobIdx = 0;
-        bookPreviewData = null;
-        bookPreviewChapters = [];
+        savedJobIds = new Set(); reviewDrafts = {}; reviewJobIdx = 0;
+        bookPreviewData = null; bookPreviewChapters = [];
         if (data.errors?.length) showToast(`${data.errors.length} Kapitel konnten nicht verarbeitet werden.`);
         showPage('review');
       } else {
-        // Legacy: book_ready (should not happen anymore, but kept for compat)
         bookPreviewData = null; bookPreviewChapters = [];
         showPage('home');
         showToast(`${(data.chapters||[]).length} Kapitel gespeichert ✓`);
         loadVaultTree();
       }
     } catch { showToast('Backend nicht erreichbar'); }
-    finally { btn.disabled = false; hideProgress(); stopPolling(); }
+    finally {
+      _stopBkpPolling();
+      if (!success) { showPage('book-preview'); _lockBkpInputs(false); }
+    }
   });
 
   document.getElementById('btn-bkp-back').addEventListener('click', () => {

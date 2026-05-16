@@ -1248,6 +1248,7 @@ class BookRunRequest(BaseModel):
     pdf_id: str
     model: str = "auto"
     chapters: list[dict]
+    book_title: str | None = None
 
 
 @app.post("/config")
@@ -1265,7 +1266,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "3.0.2"
+MNEME_VERSION = "3.0.3"
 
 
 @app.get("/version")
@@ -1923,6 +1924,8 @@ async def process_book_run(req: BookRunRequest):
         book_meta = extract_metadata_regex(intro_text)
         if not book_meta.get("title"):
             book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem)[:80].strip()
+        if req.book_title and req.book_title.strip():
+            book_meta["title"] = req.book_title.strip()
 
         folder_name = derive_output_filename(book_meta, pdf_filename).replace(".md", "")
 
@@ -2078,8 +2081,8 @@ async def _execute_book_chapters(
 
     for i, chapter in enumerate(chapters_with_pages):
         chapter_num = chapter.get("chapter", i + 1)
-        chapter_title = chapter.get("title", f"Kapitel {chapter_num}")
-        chapter_author = chapter.get("author")
+        chapter_title = re.sub(r'[\x00-\x1f\x7f]', '', chapter.get("title", f"Kapitel {chapter_num}")).strip() or f"Kapitel {chapter_num}"
+        chapter_author = chapter.get("author") or ""
         pdf_start = chapter.get("pdf_page", 0)
         if i + 1 < n:
             pdf_end = chapters_with_pages[i + 1].get("pdf_page", len(doc))
@@ -2103,7 +2106,7 @@ async def _execute_book_chapters(
                 stage_prefix=f"[{chapter_num}/{n}] ",
                 full_text_override=chapter_text,
                 extra_cached_terms=accumulated_terms,
-                meta_override={"author": chapter_author} if chapter_author else None,
+                meta_override={"title": chapter_title, "author": chapter_author} if chapter_author else {"title": chapter_title},
             )
             # Build book chapter frontmatter (overrides article frontmatter in draft)
             if chapter_author:
