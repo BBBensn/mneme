@@ -12,7 +12,7 @@ Ablageort: `~/Documents/Coding/J-Vault/mneme/CLAUDE.md`
 ## Projekt-Basics
 
 - **Name:** mneme
-- **Version:** v3.0.4
+- **Version:** v3.0.5
 - **Status:** active
 - **Stack:** Vanilla JS + FastAPI + pymupdf + Ollama + Anthropic SDK
 - **Läuft lokal auf:** MacBook (kein Server-Deploy)
@@ -193,6 +193,7 @@ date_modified: 2026-05-14 14:45:00
 | v3.0.2  | UI Cleanup, Duplikat-Batch, Cancel, Fortschritt      | ✅ done     |
 | v3.0.3  | Cancel-Fix, Buch-Fortschritt, Metadaten, Locks       | ✅ done     |
 | v3.0.4  | Metadaten-Preview, Seitenoffset, Einzel-Autor, Titel-Fix | ✅ done |
+| v3.0.5  | Buch-Pfad-Fix, Alles-Speichern, Kapitel-Erkennung       | ✅ done     |
 | v3.1.0  | Token-Verwaltung Bubble+Tree UI                      | geplant     |
 | v3.2.0  | Graph-UI, Literatursuche via Claude                  | geplant     |
 

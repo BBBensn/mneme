@@ -984,6 +984,7 @@
     <div class="review-actions">
       <button class="btn-secondary" id="btn-quality-pass" style="white-space:nowrap">Nochmal mit Claude</button>
       <button class="btn-danger" id="btn-cancel-review">✕ Verwerfen</button>
+      <button class="btn-secondary" id="btn-save-all-review" style="display:none;white-space:nowrap">Alle speichern</button>
       <button class="btn-primary" id="btn-confirm-review" style="flex:1">Speichern</button>
     </div>
 
@@ -2069,6 +2070,10 @@
     // Quality-pass only for legacy single-file flow
     document.getElementById('btn-quality-pass').style.display = isQueue ? 'none' : '';
 
+    // "Alle speichern" — only when multiple unsaved jobs remain
+    const unsavedDoneCount = activeJobs.filter(j => j.status === 'done' && !savedJobIds.has(j.job_id)).length;
+    document.getElementById('btn-save-all-review').style.display = (isQueue && unsavedDoneCount > 1) ? '' : 'none';
+
     renderTokenList();
   }
 
@@ -2224,6 +2229,62 @@
       currentDraft = null; reviewMergedTerms = []; reviewIsBulk = false;
     }
     showPage('home');
+  });
+
+  document.getElementById('btn-save-all-review').addEventListener('click', async () => {
+    const unsaved = activeJobs.filter(j => j.status === 'done' && !savedJobIds.has(j.job_id));
+    if (!unsaved.length) return;
+
+    const unreviewed = unsaved.filter(j => !reviewDrafts[j.job_id]);
+    if (unreviewed.length) {
+      if (!confirm(`${unreviewed.length} Dateien wurden noch nicht gereviewed. Alle Begriffe werden als ausgewählt gespeichert. Fortfahren?`)) return;
+    }
+
+    const btn = document.getElementById('btn-save-all-review');
+    btn.disabled = true;
+    let saved = 0;
+    for (const job of unsaved) {
+      btn.textContent = `Speichere ${saved + 1}/${unsaved.length}…`;
+      const savedState = reviewDrafts[job.job_id];
+      const tokens = savedState ? savedState.tokens : (job.draft?.tokens || []);
+      const selectedTerms = tokens.filter(t => t.selected).map(t => t.canonical);
+      const meta = job.draft?.meta || {};
+      const metaOverride = savedState
+        ? { title: savedState.metaTitle || meta.title || '', author: savedState.metaAuthor || meta.author || '', year: savedState.metaYear || meta.year || '' }
+        : { title: meta.title || '', author: meta.author || '', year: meta.year || '' };
+      // Also apply metaOverride from queue pre-fill if available
+      const queueMeta = job.metaOverride || {};
+      if (!savedState) {
+        if (queueMeta.title) metaOverride.title = queueMeta.title;
+        if (queueMeta.author) metaOverride.author = queueMeta.author;
+        if (queueMeta.year) metaOverride.year = queueMeta.year;
+      }
+      try {
+        const r = await fetch(`${API}/process/queue/confirm`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: job.job_id, selected_terms: selectedTerms, merged_terms: [], meta_override: metaOverride }),
+        });
+        if (r.ok) { savedJobIds.add(job.job_id); saved++; }
+      } catch {}
+    }
+
+    loadVaultTree();
+    showToast(`${saved} ${saved === 1 ? 'Datei' : 'Dateien'} gespeichert ✓`);
+
+    if (bookReviewBookId) {
+      try {
+        await fetch(`${API}/process/book/finalize`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ book_id: bookReviewBookId }),
+        });
+      } catch {}
+      bookReviewBookId = null;
+    }
+
+    const savedCount = savedJobIds.size;
+    activeJobs = []; reviewJobIdx = 0; savedJobIds = new Set(); reviewDrafts = {};
+    showPage('home');
+    setStatus('success', `${savedCount} Notizen gespeichert ✓`);
   });
 
   document.getElementById('btn-quality-pass').addEventListener('click', async () => {

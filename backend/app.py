@@ -885,26 +885,41 @@ def parse_chapter_structure(raw: str) -> list[dict]:
 
 
 def find_chapter_boundaries(doc, chapters: list[dict], page_offset: int = 0) -> list[dict]:
-    """Find actual PDF page indices by searching for chapter titles in page text."""
+    """Find actual PDF page indices using pymupdf search_for (handles mid-page starts),
+    with progressive regex fallback for hyphenated or split titles."""
     result = []
     for ch in chapters:
         title = ch.get("title", "")
-        page_hint = max(0, int(ch.get("page_start") or 1) - 1 + page_offset - 2)
+        page_start_printed = int(ch.get("page_start") or 1)
+        expected_pdf_page = page_start_printed + page_offset - 1
+        search_start = max(0, expected_pdf_page - 5)
+        search_end = min(len(doc), expected_pdf_page + 10)
+
         found_page = None
-        # Try progressively shorter substrings of the title (longest first)
-        for frac in (1.0, 0.66, 0.33):
-            sub = title[:max(5, int(len(title) * frac))]
-            if len(sub) < 5:
-                break
-            pattern = re.compile(re.escape(sub), re.IGNORECASE)
-            for page_idx in range(page_hint, len(doc)):
-                if pattern.search(doc[page_idx].get_text()):
-                    found_page = page_idx
+        # Primary: exact pymupdf search with first 6 words (robust against mid-page starts)
+        search_term = " ".join(title.split()[:6])
+        if len(search_term) >= 5:
+            for page_num in range(search_start, search_end):
+                if doc[page_num].search_for(search_term):
+                    found_page = page_num
                     break
-            if found_page is not None:
-                break
+
         if found_page is None:
-            found_page = max(0, int(ch.get("page_start") or 1) - 1 + page_offset)
+            # Fallback: progressively shorter regex substrings
+            for frac in (1.0, 0.66, 0.33):
+                sub = title[:max(5, int(len(title) * frac))]
+                if len(sub) < 5:
+                    break
+                pattern = re.compile(re.escape(sub), re.IGNORECASE)
+                for page_num in range(search_start, search_end):
+                    if pattern.search(doc[page_num].get_text()):
+                        found_page = page_num
+                        break
+                if found_page is not None:
+                    break
+
+        if found_page is None:
+            found_page = max(0, expected_pdf_page)
         result.append({**ch, "pdf_page": found_page})
     return result
 
@@ -1268,7 +1283,7 @@ def update_config(update: ConfigUpdate):
     return {"ok": True}
 
 
-MNEME_VERSION = "3.0.3"
+MNEME_VERSION = "3.0.4"
 
 
 @app.get("/version")
@@ -1759,7 +1774,7 @@ def confirm_queue_job(req: QueueConfirmRequest):
                     rf'^{re.escape(field)}:.*$', f'{field}: {yaml_str(str(value))}',
                     draft["frontmatter"], flags=re.MULTILINE,
                 )
-        if req.meta_override.get("title"):
+        if req.meta_override.get("title") and "/" not in draft.get("output_filename", ""):
             draft["output_filename"] = derive_output_filename(meta, draft.get("source_pdf", "document.pdf"))
 
     vault_path = draft["vault_path"]
