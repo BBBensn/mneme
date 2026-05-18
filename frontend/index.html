@@ -466,6 +466,13 @@
     /* Drag handle */
     .queue-drag-handle { cursor:grab; color:var(--text2); padding:0 4px; user-select:none; flex-shrink:0; }
     .queue-row.drag-over { border-top:2px solid var(--accent); }
+    .queue-meta-btn { background:none; border:none; cursor:pointer; color:var(--text2); padding:4px 6px; font-size:14px; flex-shrink:0; }
+    .queue-meta-btn.active { color:var(--accent); }
+    .queue-meta-btn:hover { color:var(--accent); }
+    .queue-meta-form { padding:6px 0 2px 34px; border-bottom:1px solid var(--border); }
+    .queue-meta-form .meta-row { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+    .queue-meta-form label { font-size:11px; color:var(--text2); width:44px; flex-shrink:0; text-align:right; }
+    .queue-meta-form input { flex:1; font-size:12px; padding:3px 8px; border:1px solid var(--border); border-radius:4px; background:var(--surface); color:var(--text); }
 
     /* Bulk page */
     .pdf-row {
@@ -792,10 +799,25 @@
   <div class="page" id="page-book-preview">
 
     <div class="card">
-      <div style="margin-bottom:16px">
+      <div style="margin-bottom:12px">
         <label style="font-size:11px;font-weight:500;color:var(--text2);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:4px">Buchtitel</label>
-        <input type="text" id="bkp-title-input" style="width:100%;font-size:15px;font-weight:600;padding:8px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
-        <div id="bkp-meta" style="font-size:13px;color:var(--text2)"></div>
+        <input type="text" id="bkp-title-input" style="width:100%;font-size:15px;font-weight:600;padding:8px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <div id="bkp-type-toggle" style="display:flex;gap:0">
+            <button id="bkp-type-mono" style="padding:3px 10px;font-size:12px;border:1px solid var(--border);border-radius:4px 0 0 4px;cursor:pointer;background:var(--surface);color:var(--text)">Monographie</button>
+            <button id="bkp-type-sammel" style="padding:3px 10px;font-size:12px;border:1px solid var(--border);border-left:none;border-radius:0 4px 4px 0;cursor:pointer;background:var(--surface);color:var(--text)">Sammelband</button>
+          </div>
+          <div id="bkp-pages-info" style="font-size:13px;color:var(--text2)"></div>
+        </div>
+        <div id="bkp-author-row" style="margin-top:8px;display:none">
+          <label style="font-size:11px;color:var(--text2);display:block;margin-bottom:3px">Autor(en) — für alle Kapitel</label>
+          <input type="text" id="bkp-book-author" placeholder="z.B. Max Mustermann" style="width:100%;font-size:13px;padding:6px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm)">
+        </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+          <label style="font-size:11px;color:var(--text2);white-space:nowrap">Seite 1 beginnt auf PDF-Seite</label>
+          <input type="number" id="bkp-page-offset" min="1" value="1" style="width:70px;font-size:13px;padding:4px 8px;border:1.5px solid var(--border);border-radius:var(--radius-sm)">
+          <span style="font-size:11px;color:var(--text2)">(Standard: 1, bei röm. Vorziffern anpassen)</span>
+        </div>
       </div>
       <div class="section-header" style="margin-bottom:8px">
         <div class="section-label">Beiträge <span id="bkp-count" style="font-weight:400"></span></div>
@@ -1027,6 +1049,8 @@
   let jobStartTimes = {};  // {job_id: Date.now()}
   let queueDuplicates = {};  // {filename: {exists, existing_file, match_type}}
   let queueStartTime = 0;
+  let queueMetaExpanded = new Set();  // ids of expanded meta-edit rows
+  let bkpBookType = 'monographie';
 
   // Elements
   const pageHome = document.getElementById('page-home');
@@ -1156,6 +1180,7 @@
       id: Math.random().toString(36).slice(2),
       file: f,
       type: f.size > 3 * 1024 * 1024 ? 'book' : 'article',
+      meta: null,
     }));
     const onQueuePage = document.getElementById('page-queue').classList.contains('active');
     if (onQueuePage) {
@@ -1167,6 +1192,21 @@
       showPage('queue');
     }
     checkQueueDuplicates();
+    fetchQueueMeta(newEntries.filter(e => e.type === 'article'));
+  }
+
+  async function fetchQueueMeta(entries) {
+    for (const qf of entries) {
+      try {
+        const fd = new FormData();
+        fd.append('file', qf.file);
+        const r = await fetch(`${API}/extract/metadata`, { method: 'POST', body: fd });
+        if (r.ok) {
+          qf.meta = await r.json();
+          renderQueue();
+        }
+      } catch {}
+    }
   }
 
   async function checkQueueDuplicates() {
@@ -1233,31 +1273,58 @@
       const dupBadge = dup?.exists
         ? `<span style="color:var(--warning);font-size:11px;flex-shrink:0;white-space:nowrap" title="Bereits verarbeitet: ${esc(dup.existing_file||'')}">⚠ Duplikat</span>`
         : '';
+      const isExpanded = queueMetaExpanded.has(f.id);
+      const metaFormHtml = (isExpanded && f.type === 'article') ? `
+        <div class="queue-meta-form">
+          <div class="meta-row"><label>Titel</label><input data-meta="title" data-id="${f.id}" value="${esc(f.meta?.title||'')}"></div>
+          <div class="meta-row"><label>Autor</label><input data-meta="author" data-id="${f.id}" value="${esc(f.meta?.author||'')}"></div>
+          <div class="meta-row"><label>Jahr</label><input data-meta="year" data-id="${f.id}" value="${esc(f.meta?.year||'')}"></div>
+          <div class="meta-row"><label>DOI</label><input data-meta="doi" data-id="${f.id}" value="${esc(f.meta?.doi||'')}"></div>
+        </div>` : '';
       return `
-      <div class="queue-row" draggable="true" data-idx="${idx}" data-id="${f.id}">
-        <span class="queue-drag-handle" title="Ziehen zum Sortieren">⠿</span>
-        <div class="queue-filename" title="${esc(f.file.name)}">${esc(f.file.name)}</div>
-        ${dupBadge}
-        <div style="font-size:12px;color:var(--text2);flex-shrink:0">${formatBytes(f.file.size)}</div>
-        <div style="display:flex;gap:4px;flex-shrink:0">
-          <button class="queue-type-btn ${f.type === 'article' ? 'active' : ''}" data-id="${f.id}" data-type="article">Artikel</button>
-          <button class="queue-type-btn ${f.type === 'book' ? 'active' : ''}" data-id="${f.id}" data-type="book">Buch</button>
+      <div data-entry-id="${f.id}">
+        <div class="queue-row" draggable="true" data-idx="${idx}" data-id="${f.id}">
+          <span class="queue-drag-handle" title="Ziehen zum Sortieren">⠿</span>
+          <div class="queue-filename" title="${esc(f.file.name)}">${esc(f.file.name)}</div>
+          ${dupBadge}
+          <div style="font-size:12px;color:var(--text2);flex-shrink:0">${formatBytes(f.file.size)}</div>
+          <div style="display:flex;gap:4px;flex-shrink:0">
+            <button class="queue-type-btn ${f.type === 'article' ? 'active' : ''}" data-id="${f.id}" data-type="article">Artikel</button>
+            <button class="queue-type-btn ${f.type === 'book' ? 'active' : ''}" data-id="${f.id}" data-type="book">Buch</button>
+          </div>
+          ${f.type === 'article' ? `<button class="queue-meta-btn${isExpanded ? ' active' : ''}" data-id="${f.id}" title="Metadaten bearbeiten">✎</button>` : ''}
+          <button class="queue-del-btn" data-id="${f.id}">×</button>
         </div>
-        <button class="queue-del-btn" data-id="${f.id}">×</button>
+        ${metaFormHtml}
       </div>`;
     }).join('');
 
-    document.querySelectorAll('.queue-type-btn').forEach(btn => {
+    listEl.querySelectorAll('.queue-type-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const qf = queueFiles.find(f => f.id === btn.dataset.id);
-        if (qf) { qf.type = btn.dataset.type; renderQueue(); }
+        if (qf) { qf.type = btn.dataset.type; if (qf.type === 'book') queueMetaExpanded.delete(qf.id); renderQueue(); }
       });
     });
-    document.querySelectorAll('.queue-del-btn').forEach(btn => {
+    listEl.querySelectorAll('.queue-del-btn').forEach(btn => {
       btn.addEventListener('click', () => {
+        queueMetaExpanded.delete(btn.dataset.id);
         queueFiles = queueFiles.filter(f => f.id !== btn.dataset.id);
         if (!queueFiles.length) showPage('home');
         else renderQueue();
+      });
+    });
+    listEl.querySelectorAll('.queue-meta-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        if (queueMetaExpanded.has(id)) queueMetaExpanded.delete(id);
+        else queueMetaExpanded.add(id);
+        renderQueue();
+      });
+    });
+    listEl.querySelectorAll('[data-meta]').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const qf = queueFiles.find(f => f.id === inp.dataset.id);
+        if (qf) { if (!qf.meta) qf.meta = {}; qf.meta[inp.dataset.meta] = inp.value; }
       });
     });
     // Drag & drop reordering
@@ -1296,6 +1363,10 @@
 
     const btn = document.getElementById('btn-queue-run');
     btn.disabled = true;
+    const metaByFilename = {};
+    for (const qf of articles) {
+      if (qf.meta && Object.values(qf.meta).some(v => v)) metaByFilename[qf.file.name] = qf.meta;
+    }
     const fd = new FormData();
     for (const qf of articles) fd.append('files', qf.file);
     fd.append('model', queueModel);
@@ -1303,8 +1374,9 @@
       const r = await fetch(`${API}/process/queue`, { method: 'POST', body: fd });
       const data = await r.json();
       if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); btn.disabled = false; return; }
-      activeJobs = data.jobs.map(j => ({ ...j, status: 'pending', stage: 'Wartend...', draft: null, error: null }));
-      queueFiles = []; queueDuplicates = {};
+      activeJobs = data.jobs.map(j => ({ ...j, status: 'pending', stage: 'Wartend...', draft: null, error: null,
+                                          metaOverride: metaByFilename[j.filename] || null }));
+      queueFiles = []; queueDuplicates = {}; queueMetaExpanded = new Set();
       queueStartTime = Date.now();
       showPage('queue-progress');
       renderQueueProgress();
@@ -1927,15 +1999,16 @@
     const saved = reviewDrafts[job.job_id];
     const d = job.draft || {};
     const meta = d.meta || {};
+    const override = job.metaOverride || {};
     if (saved) {
       job.draft.tokens = saved.tokens;
       document.getElementById('review-meta-title').value = saved.metaTitle;
       document.getElementById('review-meta-author').value = saved.metaAuthor;
       document.getElementById('review-meta-year').value = saved.metaYear;
     } else {
-      document.getElementById('review-meta-title').value = meta.title || '';
-      document.getElementById('review-meta-author').value = meta.author || '';
-      document.getElementById('review-meta-year').value = meta.year || '';
+      document.getElementById('review-meta-title').value = override.title || meta.title || '';
+      document.getElementById('review-meta-author').value = override.author || meta.author || '';
+      document.getElementById('review-meta-year').value = override.year || meta.year || '';
     }
   }
 
@@ -2230,27 +2303,52 @@
   function renderBookPreview() {
     if (!bookPreviewData) return;
     document.getElementById('bkp-title-input').value = bookPreviewData.title || '';
-    const typeBadge = bookPreviewData.book_type === 'sammelband'
-      ? '<span style="background:rgba(255,159,10,0.12);color:#7a4a00;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Sammelband</span>'
-      : '<span style="background:rgba(0,113,227,0.08);color:var(--accent);padding:2px 8px;border-radius:10px;font-size:12px;font-weight:500">Monographie</span>';
-    document.getElementById('bkp-meta').innerHTML = `${typeBadge} · ${bookPreviewData.total_pages} Seiten`;
+    document.getElementById('bkp-pages-info').textContent = `${bookPreviewData.total_pages} Seiten`;
+    bkpBookType = bookPreviewData.book_type || 'monographie';
+    bkpUpdateTypeToggle();
     bkpAutoFillPageEnds();
     // Author column default: visible if any chapter has author
     const savedVis = localStorage.getItem('bkpAuthorVisible');
     if (savedVis !== null) {
       bkpAuthorVisible = savedVis === '1';
     } else {
-      bkpAuthorVisible = bookPreviewChapters.some(c => c.author);
+      bkpAuthorVisible = bkpBookType === 'sammelband' && bookPreviewChapters.some(c => c.author);
     }
     renderBkpList();
   }
 
+  function bkpUpdateTypeToggle() {
+    const isSammel = bkpBookType === 'sammelband';
+    const monoBtn = document.getElementById('bkp-type-mono');
+    const sammelBtn = document.getElementById('bkp-type-sammel');
+    const authorRow = document.getElementById('bkp-author-row');
+    if (monoBtn) {
+      monoBtn.style.background = !isSammel ? 'var(--accent)' : 'var(--surface)';
+      monoBtn.style.color = !isSammel ? '#fff' : 'var(--text)';
+      monoBtn.style.borderColor = !isSammel ? 'var(--accent)' : 'var(--border)';
+    }
+    if (sammelBtn) {
+      sammelBtn.style.background = isSammel ? 'var(--accent)' : 'var(--surface)';
+      sammelBtn.style.color = isSammel ? '#fff' : 'var(--text)';
+      sammelBtn.style.borderColor = isSammel ? 'var(--accent)' : 'var(--border)';
+    }
+    if (authorRow) authorRow.style.display = isSammel ? 'none' : 'block';
+    // Author column in chapter list: only relevant for sammelband
+    if (!isSammel) {
+      bkpAuthorVisible = false;
+      localStorage.setItem('bkpAuthorVisible', '0');
+    }
+  }
+
   function renderBkpList() {
+    const isSammel = bkpBookType === 'sammelband';
     const enabled = bookPreviewChapters.filter(c => !c.is_section && c.enabled).length;
     document.getElementById('bkp-count').textContent = `(${enabled} ausgewählt)`;
-    document.getElementById('btn-bkp-run').textContent = `${enabled} Beiträge verarbeiten`;
-    document.getElementById('btn-bkp-authors').textContent = bkpAuthorVisible ? 'Autoren ✓' : 'Autoren';
-    const authorDisplay = bkpAuthorVisible ? 'block' : 'none';
+    document.getElementById('btn-bkp-run').textContent = isSammel ? `${enabled} Beiträge verarbeiten` : `${enabled} Kapitel verarbeiten`;
+    const authorsBtn = document.getElementById('btn-bkp-authors');
+    authorsBtn.style.display = isSammel ? '' : 'none';
+    if (isSammel) authorsBtn.textContent = bkpAuthorVisible ? 'Autoren ✓' : 'Autoren';
+    const authorDisplay = (isSammel && bkpAuthorVisible) ? 'block' : 'none';
     document.getElementById('bkp-chapter-list').innerHTML = bookPreviewChapters.map((ch, idx) => {
       if (ch.is_section) {
         return `<div class="bkp-row section">
@@ -2282,6 +2380,18 @@
   function bkpSetPage(idx, val) { bookPreviewChapters[idx].page_start = parseInt(val) || 1; }
   function bkpSetPageEnd(idx, val) { bookPreviewChapters[idx].page_end = val ? (parseInt(val) || null) : null; }
   function bkpDelete(idx) { bookPreviewChapters.splice(idx, 1); renderBkpList(); }
+
+  document.getElementById('bkp-type-mono').addEventListener('click', () => {
+    bkpBookType = 'monographie';
+    bkpUpdateTypeToggle();
+    renderBkpList();
+  });
+
+  document.getElementById('bkp-type-sammel').addEventListener('click', () => {
+    bkpBookType = 'sammelband';
+    bkpUpdateTypeToggle();
+    renderBkpList();
+  });
 
   document.getElementById('btn-bkp-toggle').addEventListener('click', () => {
     bkpAllSelected = !bkpAllSelected;
@@ -2348,6 +2458,10 @@
     const chapterList = document.getElementById('bkp-chapter-list');
     const titleInput = document.getElementById('bkp-title-input');
     const bookTitle = titleInput ? titleInput.value.trim() : '';
+    const bookAuthorInput = document.getElementById('bkp-book-author');
+    const bookAuthor = (bkpBookType === 'monographie' && bookAuthorInput) ? bookAuthorInput.value.trim() : '';
+    const pageOffsetInput = document.getElementById('bkp-page-offset');
+    const pageOffset = pageOffsetInput ? Math.max(0, parseInt(pageOffsetInput.value || '1') - 1) : 0;
 
     function _lockBkpInputs(lock) {
       btn.disabled = lock;
@@ -2355,6 +2469,8 @@
       chapterList.style.opacity = lock ? '0.5' : '';
       chapterList.querySelectorAll('input').forEach(el => { el.disabled = lock; });
       if (titleInput) titleInput.disabled = lock;
+      if (bookAuthorInput) bookAuthorInput.disabled = lock;
+      if (pageOffsetInput) pageOffsetInput.disabled = lock;
     }
 
     _lockBkpInputs(true);
@@ -2391,6 +2507,8 @@
           pdf_id: bookPreviewData.pdf_id, model: selectedModel,
           chapters: bookPreviewChapters,
           ...(bookTitle && { book_title: bookTitle }),
+          ...(bookAuthor && { book_author: bookAuthor }),
+          page_offset: pageOffset,
         }),
       });
       const data = await r.json();
@@ -2447,7 +2565,8 @@
       const r = await fetch(`${API}/process/book/run_dry`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pdf_id: bookPreviewData.pdf_id, model: selectedModel, chapters: bookPreviewChapters }),
+        body: JSON.stringify({ pdf_id: bookPreviewData.pdf_id, model: selectedModel, chapters: bookPreviewChapters,
+                               page_offset: Math.max(0, parseInt(document.getElementById('bkp-page-offset')?.value || '1') - 1) }),
       });
       const data = await r.json();
       if (!r.ok) { showToast(`Fehler: ${data.detail || r.statusText}`); return; }

@@ -497,9 +497,9 @@ def parse_metadata(raw: str) -> dict:
 def derive_output_filename(meta: dict, fallback: str) -> str:
     # "Ogwudile Chinenye Linda", 2025, "Stufflebeam's CIPP Model of Evaluation"
     # → "Ogwudile Chinenye Linda-2025-Stufflebeam's CIPP Model of Evaluation.md"
-    author = (meta.get("author") or "").strip()[:40]
+    author = (meta.get("author") or "").strip()[:60]
     year = (meta.get("year") or "").strip()
-    title = (meta.get("title") or "").strip()[:80]
+    title = (meta.get("title") or "").strip()
     parts = [p for p in [author, year, title] if p]
     raw_name = "-".join(parts) if parts else fallback.replace(".pdf", "")
     safe_name = re.sub(r'[<>:"/\\|?*]', "", raw_name).strip("-").strip()
@@ -884,12 +884,12 @@ def parse_chapter_structure(raw: str) -> list[dict]:
         return []
 
 
-def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
+def find_chapter_boundaries(doc, chapters: list[dict], page_offset: int = 0) -> list[dict]:
     """Find actual PDF page indices by searching for chapter titles in page text."""
     result = []
     for ch in chapters:
         title = ch.get("title", "")
-        page_hint = max(0, int(ch.get("page_start") or 1) - 3)
+        page_hint = max(0, int(ch.get("page_start") or 1) - 1 + page_offset - 2)
         found_page = None
         # Try progressively shorter substrings of the title (longest first)
         for frac in (1.0, 0.66, 0.33):
@@ -904,16 +904,16 @@ def find_chapter_boundaries(doc, chapters: list[dict]) -> list[dict]:
             if found_page is not None:
                 break
         if found_page is None:
-            found_page = max(0, int(ch.get("page_start") or 1) - 2)
+            found_page = max(0, int(ch.get("page_start") or 1) - 1 + page_offset)
         result.append({**ch, "pdf_page": found_page})
     return result
 
 
-def _pdf_page_from_printed(page_end: int | None, doc_len: int) -> int:
+def _pdf_page_from_printed(page_end: int | None, doc_len: int, page_offset: int = 0) -> int:
     """Convert printed page_end to a capped PDF page index."""
     if page_end is None:
         return doc_len
-    return min(max(0, page_end - 1), doc_len)
+    return min(max(0, page_end - 1 + page_offset), doc_len)
 
 
 def _is_author_line(s: str) -> bool:
@@ -1249,6 +1249,8 @@ class BookRunRequest(BaseModel):
     model: str = "auto"
     chapters: list[dict]
     book_title: str | None = None
+    book_author: str | None = None
+    page_offset: int = 0
 
 
 @app.post("/config")
@@ -1330,6 +1332,41 @@ def check_duplicates_batch(req: BatchDuplicateCheckRequest):
         else:
             results[filename] = empty
     return {"results": results}
+
+
+@app.post("/extract/metadata")
+async def extract_metadata_quick(file: UploadFile = File(...)):
+    """Quick metadata extraction from first pages — used for pre-processing preview in queue."""
+    pdf_bytes = await file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="empty_file")
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"pdf_parse_error: {e}")
+    intro_text = "\n\n".join(doc[p].get_text() for p in range(min(5, len(doc))))
+    pdf_meta_title = _extract_pdf_title(doc)
+    doc.close()
+    cfg = load_config()
+    api_key = get_anthropic_key(cfg)
+    meta: dict = {}
+    if api_key.strip():
+        try:
+            meta = parse_metadata(call_claude(api_key, build_metadata_prompt(intro_text), max_tokens=256))
+        except Exception:
+            meta = extract_metadata_regex(intro_text)
+    else:
+        meta = extract_metadata_regex(intro_text)
+    if pdf_meta_title:
+        meta["title"] = pdf_meta_title
+    elif not meta.get("title"):
+        meta["title"] = re.sub(r'[_\-.]', ' ', Path(file.filename or "document").stem).strip()
+    return {
+        "title": meta.get("title", ""),
+        "author": meta.get("author", ""),
+        "year": meta.get("year", ""),
+        "doi": meta.get("doi", ""),
+    }
 
 
 @app.get("/last_run_cost")
@@ -1837,7 +1874,7 @@ async def process_book_preview(file: UploadFile = File(...), model: str = "auto"
         book_title = _extract_pdf_title(doc)
         if not book_title:
             book_title = (extract_metadata_regex(front_pages_text).get("title") or
-                          re.sub(r'[_\-.]', ' ', Path(file.filename or "book").stem)[:80].strip())
+                          re.sub(r'[_\-.]', ' ', Path(file.filename or "book").stem).strip())
         doc.close()
 
         chapters = parse_toc_regex(toc_text)
@@ -1918,23 +1955,32 @@ async def process_book_run(req: BookRunRequest):
         for i, ch in enumerate(active):
             ch["chapter"] = i + 1
 
+        # Monographie: propagate global book_author to all chapters without author
+        if req.book_author and req.book_author.strip():
+            for ch in active:
+                if not ch.get("author"):
+                    ch["author"] = req.book_author.strip()
+
         _processing_status["stage"] = "Buch-Metadaten werden extrahiert..."
         _processing_status["progress"] = 0.05
         intro_text = "\n\n".join(doc[p].get_text() for p in range(min(5, len(doc))))
         book_meta = extract_metadata_regex(intro_text)
         if not book_meta.get("title"):
-            book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem)[:80].strip()
+            book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem).strip()
         if req.book_title and req.book_title.strip():
             book_meta["title"] = req.book_title.strip()
+        if req.book_author and req.book_author.strip():
+            book_meta["author"] = req.book_author.strip()
 
         folder_name = derive_output_filename(book_meta, pdf_filename).replace(".md", "")
 
         _processing_status["stage"] = "Seitengrenzen werden ermittelt..."
         _processing_status["progress"] = 0.08
-        chapters_with_pages = find_chapter_boundaries(doc, active)
+        chapters_with_pages = find_chapter_boundaries(doc, active, req.page_offset)
 
         chapter_summaries, errors = await _execute_book_chapters(
             doc, chapters_with_pages, book_meta, pdf_filename, req.model, vault_path, folder_name,
+            page_offset=req.page_offset,
         )
         doc.close()
 
@@ -1982,7 +2028,7 @@ async def process_book_run_dry(req: BookRunRequest):
         for i, ch in enumerate(active):
             ch["chapter"] = i + 1
 
-        book_meta = {"title": re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem)[:80].strip(), "author": "", "year": ""}
+        book_meta = {"title": re.sub(r'[_\-.]', ' ', Path(pdf_filename).stem).strip(), "author": "", "year": ""}
         folder_name = derive_output_filename(book_meta, pdf_filename).replace(".md", "")
         book_dir = Path(vault_path) / "Bücher" / folder_name
         book_dir.mkdir(parents=True, exist_ok=True)
@@ -2068,6 +2114,7 @@ def _write_book_overview(book_dir: Path, book_meta: dict, folder_name: str, pdf_
 async def _execute_book_chapters(
     doc, chapters_with_pages: list[dict], book_meta: dict,
     pdf_filename: str, model: str, vault_path: str, folder_name: str,
+    page_offset: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     """Process chapters, store drafts in _queue_jobs for review, return (chapter_summaries, errors)."""
     global _queue_jobs
@@ -2087,7 +2134,7 @@ async def _execute_book_chapters(
         if i + 1 < n:
             pdf_end = chapters_with_pages[i + 1].get("pdf_page", len(doc))
         else:
-            pdf_end = _pdf_page_from_printed(chapter.get("page_end"), len(doc))
+            pdf_end = _pdf_page_from_printed(chapter.get("page_end"), len(doc), page_offset)
         chapter_text = "\n\n".join(
             doc[p].get_text() for p in range(pdf_start, min(pdf_end, len(doc)))
         ).strip()
@@ -2206,7 +2253,7 @@ async def _process_book_inner(file: UploadFile, model: str) -> dict:
     except Exception:
         book_meta = extract_metadata_regex(intro_text)
     if not book_meta.get("title"):
-        book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(file.filename or "book").stem)[:80].strip()
+        book_meta["title"] = re.sub(r'[_\-.]', ' ', Path(file.filename or "book").stem).strip()
 
     folder_name = derive_output_filename(book_meta, file.filename or "book.pdf").replace(".md", "")
 
@@ -2890,7 +2937,7 @@ async def _process_pdf_bytes(pdf_bytes: bytes | None, filename: str, model: str,
     if pdf_meta_title:
         meta["title"] = pdf_meta_title
     elif not meta.get("title") or meta.get("title") == "null":
-        meta["title"] = re.sub(r'[_\-.]', ' ', Path(filename).stem)[:80].strip()
+        meta["title"] = re.sub(r'[_\-.]', ' ', Path(filename).stem).strip()
     if meta_override:
         for k, v in meta_override.items():
             if v:
